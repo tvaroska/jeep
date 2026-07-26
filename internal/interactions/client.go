@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"cloud.google.com/go/auth/credentials"
 	authhttp "cloud.google.com/go/auth/httptransport"
+	"github.com/tvaroska/jeep/internal/retry"
 )
 
 type Client struct {
@@ -19,6 +21,8 @@ type Client struct {
 	baseURL        string
 	httpClient     *http.Client
 	initialBackoff time.Duration
+	retryBackoff   time.Duration
+	Retries        int
 }
 
 func NewClient(ctx context.Context, project, region string) (*Client, error) {
@@ -86,57 +90,95 @@ func (c *Client) url(path string) string {
 	return fmt.Sprintf("%s/v1beta1/projects/%s/locations/%s/%s", c.baseURL, c.project, c.region, path)
 }
 
+type httpError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+func isRetryableHTTP(err error) bool {
+	var he *httpError
+	if errors.As(err, &he) {
+		switch he.StatusCode {
+		case 429, 500, 503:
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) withRetry(ctx context.Context, fn func() error) error {
+	base := c.retryBackoff
+	if base == 0 {
+		base = time.Second
+	}
+	return retry.Do(ctx, c.Retries, base, isRetryableHTTP, fn)
+}
+
 func (c *Client) Create(ctx context.Context, req *CreateRequest) (*Interaction, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("interactions"), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	var interaction *Interaction
+	err := c.withRetry(ctx, func() error {
+		body, err := json.Marshal(req)
+		if err != nil {
+			return fmt.Errorf("marshaling request: %w", err)
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("interactions"), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("creating interaction: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("creating interaction: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("creating interaction: HTTP %d: %s", resp.StatusCode, data)
-	}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			data, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("creating interaction: %w", &httpError{StatusCode: resp.StatusCode, Body: string(data)})
+		}
 
-	var interaction Interaction
-	if err := json.NewDecoder(resp.Body).Decode(&interaction); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-	return &interaction, nil
+		var ix Interaction
+		if err := json.NewDecoder(resp.Body).Decode(&ix); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		interaction = &ix
+		return nil
+	})
+	return interaction, err
 }
 
 func (c *Client) Get(ctx context.Context, id string) (*Interaction, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url("interactions/"+id), nil)
-	if err != nil {
-		return nil, err
-	}
+	var interaction *Interaction
+	err := c.withRetry(ctx, func() error {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url("interactions/"+id), nil)
+		if err != nil {
+			return err
+		}
 
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("getting interaction: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("getting interaction: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("getting interaction %s: HTTP %d: %s", id, resp.StatusCode, data)
-	}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			data, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("getting interaction %s: %w", id, &httpError{StatusCode: resp.StatusCode, Body: string(data)})
+		}
 
-	var interaction Interaction
-	if err := json.NewDecoder(resp.Body).Decode(&interaction); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-	return &interaction, nil
+		var ix Interaction
+		if err := json.NewDecoder(resp.Body).Decode(&ix); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		interaction = &ix
+		return nil
+	})
+	return interaction, err
 }
 
 func (c *Client) RunAndWait(ctx context.Context, req *CreateRequest, onStatus func(string)) (*Interaction, error) {

@@ -37,6 +37,48 @@ Each tool resolves its model in order:
 2. `JEEP_MODEL_<USE>` env var (`JEEP_MODEL_TEXT`, `JEEP_MODEL_IMAGE`, `JEEP_MODEL_TTS`, `JEEP_MODEL_RESEARCH`)
 3. Per-tool default: `gemini-3.5-flash` (text), `gemini-3.1-flash-image` (image), `gemini-3.1-flash-tts-preview` (tts), `deep-research-preview-04-2026` (research)
 
+## Configuration file
+
+All tools read an optional JSON config from `$XDG_CONFIG_HOME/jeep/config.json`
+(falling back to `~/.config/jeep/config.json`). Every field is optional, and
+explicit flags always take precedence over config values.
+
+```json
+{
+  "project": "my-gcp-project",
+  "region": "us-central1",
+  "quiet": true,
+  "models": {
+    "text": "gemini-3.5-flash",
+    "image": "gemini-3.1-flash-image",
+    "tts": "gemini-3.1-flash-tts-preview",
+    "research": "deep-research-preview-04-2026"
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `project` | Default GCP project (overrides auto-detection; overridden by `--project`) |
+| `region` | Default Vertex AI region (overridden by `--region`) |
+| `quiet` | Suppress stderr status messages by default |
+| `models` | Per-use model overrides, keyed by `text`, `image`, `tts`, `research` |
+
+Model precedence is `--model` flag → `JEEP_MODEL_<USE>` env var → `models.<use>`
+in the config file → built-in default.
+
+## Common flags
+
+Every tool accepts these in addition to its own flags:
+
+| Flag | Description |
+|------|-------------|
+| `--retry int` | Retry transient errors (HTTP 429/500/503) with exponential backoff (default: `0`) |
+| `--timeout duration` | Request timeout (default: `5m`; `30m` for `jeep-research`) |
+| `-q, --quiet` | Suppress stderr status messages |
+| `--dry-run` | Show the resolved config without making the API call |
+| `--version` | Print version and exit |
+
 ## jeep
 
 Send text prompts to Gemini, optionally with file attachments.
@@ -105,11 +147,13 @@ jeep --format json --search "latest Go news"
   "output_tokens": 42,
   "sources": [
     {"title": "Page Title", "uri": "https://example.com", "domain": "example.com"}
-  ]
+  ],
+  "web_search_queries": ["example search query"]
 }
 ```
 
-The `sources` field is populated when `--search` is used. In text mode, sources are printed to stderr.
+The `sources` and `web_search_queries` fields are populated when `--search` is
+used. Sources are deduplicated by URI. In text mode, sources are printed to stderr.
 
 ## jeep-image
 
@@ -201,3 +245,7 @@ In text mode, sources are appended as a numbered list. In JSON mode, sources are
 ## Supported file types
 
 Images (jpg, png, gif, webp), video (mp4, webm, mov, avi, mkv), audio (mp3, wav, flac, ogg), documents (pdf, txt, csv, json). Other file types are sent with auto-detected MIME types.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

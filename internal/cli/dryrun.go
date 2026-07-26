@@ -16,13 +16,13 @@ type DryRunFile struct {
 }
 
 type DryRunInfo struct {
-	Tool      string            `json:"tool"`
-	Model     string            `json:"model"`
-	Project   string            `json:"project"`
-	Region    string            `json:"region"`
-	PromptLen int               `json:"prompt_length"`
-	Files     []DryRunFile      `json:"files,omitempty"`
-	Extra     map[string]any    `json:"extra,omitempty"`
+	Tool      string         `json:"tool"`
+	Model     string         `json:"model"`
+	Project   string         `json:"project"`
+	Region    string         `json:"region"`
+	PromptLen int            `json:"prompt_length"`
+	Files     []DryRunFile   `json:"files,omitempty"`
+	Extra     map[string]any `json:"extra,omitempty"`
 }
 
 func ResolveDryRunFiles(files []DryRunFile) []DryRunFile {

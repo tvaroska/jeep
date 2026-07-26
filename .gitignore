@@ -3,3 +3,9 @@
 /jeep-image
 /jeep-tts
 /jeep-research
+
+# Generated output artifacts
+*.wav
+*.png
+coverage.out
+dist/

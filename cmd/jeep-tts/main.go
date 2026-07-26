@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,79 +12,43 @@ import (
 	flag "github.com/spf13/pflag"
 	"github.com/tvaroska/jeep/internal/cli"
 	"github.com/tvaroska/jeep/internal/config"
-	"github.com/tvaroska/jeep/internal/gcp"
 	"github.com/tvaroska/jeep/internal/gemini"
-	"github.com/tvaroska/jeep/internal/version"
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "jeep-tts: %v\n", err)
-		code := 1
-		var exitErr *cli.ExitError
-		if errors.As(err, &exitErr) {
-			code = exitErr.Code
-		}
-		os.Exit(code)
-	}
+	cli.RunMain("jeep-tts", run)
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	var model, project, region, voice, output, format string
-	var showVersion, quiet, listVoices, listModels, dryRun bool
-	var timeout time.Duration
-	var retries int
+	var model, voice, output string
+	var listVoices, listModels bool
+	var common cli.CommonFlags
 
-	fs := flag.NewFlagSet("jeep-tts", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := cli.NewFlagSet("jeep-tts", stderr)
+	common.Register(fs, 5*time.Minute)
 	fs.StringVar(&model, "model", "", "Model name")
-	fs.StringVar(&project, "project", "", "GCP project (default: auto-detect)")
-	fs.StringVar(&region, "region", "global", "Vertex AI region")
 	fs.StringVarP(&voice, "voice", "v", "Kore", "Voice name")
 	fs.StringVarP(&output, "output", "o", "output.wav", "Output WAV file")
-	fs.StringVar(&format, "format", "text", "Output format: text or json")
-	fs.BoolVarP(&quiet, "quiet", "q", false, "Suppress stderr messages")
-	fs.BoolVar(&dryRun, "dry-run", false, "Show what would be sent without making the API call")
 	fs.BoolVar(&listModels, "list-models", false, "List available models and exit")
 	fs.BoolVar(&listVoices, "list-voices", false, "List available voices and exit")
-	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
-	fs.DurationVar(&timeout, "timeout", 5*time.Minute, "Request timeout")
-	fs.IntVar(&retries, "retry", 0, "Retry transient errors with exponential backoff")
 	fs.Usage = func() { printUsage(fs, stderr) }
-	if err := fs.Parse(args); err != nil {
-		return &cli.ExitError{Code: cli.ExitUsage, Err: err}
-	}
-
-	if showVersion {
-		fmt.Fprintf(stdout, "jeep-tts %s\n", version.String())
-		return nil
+	if done, err := cli.Parse(fs, args, "jeep-tts", stdout, &common); err != nil || done {
+		return err
 	}
 
 	if listVoices {
-		return printVoices(stdout, format)
+		return printVoices(stdout, common.Format)
 	}
 
-	cfg := config.Load()
-	if !quiet && cfg.Quiet {
-		quiet = true
-	}
-	if region == "global" && !fs.Changed("region") && cfg.Region != "" {
-		region = cfg.Region
-	}
-	if project == "" && cfg.Project != "" {
-		project = cfg.Project
-	}
-	if project == "" {
-		project = gcp.ResolveProject()
-	}
-	if project == "" {
-		return cli.Exitf(cli.ExitConfig, "could not determine GCP project; set GOOGLE_CLOUD_PROJECT or pass --project")
+	cfg, err := cli.ResolveCommon(fs, &common.Project, &common.Region, &common.Quiet)
+	if err != nil {
+		return err
 	}
 
 	if listModels {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), common.Timeout)
 		defer cancel()
-		return printModels(ctx, stdout, project, region, format)
+		return cli.PrintModels(ctx, stdout, common.Project, common.Region, common.Format)
 	}
 
 	prompt, err := cli.ResolvePrompt(fs.Args())
@@ -94,25 +57,25 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if model == "" {
-		model = config.ResolveModel("TTS")
+		model = config.ResolveModelWithConfig(cfg, "TTS")
 	}
 
-	if dryRun {
+	if common.DryRun {
 		info := &cli.DryRunInfo{
 			Tool:      "jeep-tts",
 			Model:     model,
-			Project:   project,
-			Region:    region,
+			Project:   common.Project,
+			Region:    common.Region,
 			PromptLen: len(prompt),
 			Extra:     map[string]any{"voice": voice},
 		}
-		return info.Print(stdout, format)
+		return info.Print(stdout, common.Format)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), common.Timeout)
 	defer cancel()
 
-	result, err := gemini.GenerateSpeech(ctx, project, region, model, voice, prompt, retries)
+	result, err := gemini.GenerateSpeech(ctx, common.Project, common.Region, model, voice, prompt, common.Retries)
 	if err != nil {
 		return cli.Exitf(cli.ExitAPI, "%w", err)
 	}
@@ -125,7 +88,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	duration := float64(len(result.PCMData)) / 2 / 24000
 
-	switch format {
+	switch common.Format {
 	case "json":
 		out := struct {
 			Output   string  `json:"output"`
@@ -146,28 +109,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("encoding output: %w", err)
 		}
 	default:
-		if !quiet {
+		if !common.Quiet {
 			fmt.Fprintf(stderr, "Saved %s (%d bytes, %.1fs)\n", output, len(wav), duration)
-		}
-	}
-	return nil
-}
-
-func printModels(ctx context.Context, w io.Writer, project, region, format string) error {
-	models, err := gemini.ListModels(ctx, project, region)
-	if err != nil {
-		return cli.Exitf(cli.ExitAPI, "%w", err)
-	}
-	if format == "json" {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(models)
-	}
-	for _, m := range models {
-		if m.DisplayName != "" {
-			fmt.Fprintf(w, "%-40s %s\n", m.Name, m.DisplayName)
-		} else {
-			fmt.Fprintln(w, m.Name)
 		}
 	}
 	return nil

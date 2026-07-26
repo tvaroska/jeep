@@ -3,74 +3,37 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
 	flag "github.com/spf13/pflag"
 	"github.com/tvaroska/jeep/internal/cli"
 	"github.com/tvaroska/jeep/internal/config"
-	"github.com/tvaroska/jeep/internal/gcp"
 	"github.com/tvaroska/jeep/internal/gemini"
 	"github.com/tvaroska/jeep/internal/interactions"
-	"github.com/tvaroska/jeep/internal/version"
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "jeep-research: %v\n", err)
-		code := 1
-		var exitErr *cli.ExitError
-		if errors.As(err, &exitErr) {
-			code = exitErr.Code
-		}
-		os.Exit(code)
-	}
+	cli.RunMain("jeep-research", run)
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	var agent, project, region, format string
-	var showVersion, quiet, dryRun bool
-	var timeout time.Duration
+	var agent string
+	var common cli.CommonFlags
 
-	fs := flag.NewFlagSet("jeep-research", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := cli.NewFlagSet("jeep-research", stderr)
+	common.Register(fs, 30*time.Minute)
 	fs.StringVar(&agent, "agent", "", "Agent name")
-	fs.StringVar(&project, "project", "", "GCP project (default: auto-detect)")
-	fs.StringVar(&region, "region", "global", "Vertex AI region")
-	fs.StringVar(&format, "format", "text", "Output format: text or json")
-	fs.BoolVarP(&quiet, "quiet", "q", false, "Suppress stderr messages")
-	fs.BoolVar(&dryRun, "dry-run", false, "Show what would be sent without making the API call")
-	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
-	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "Request timeout")
 	fs.Usage = func() { printUsage(fs, stderr) }
-	if err := fs.Parse(args); err != nil {
-		return &cli.ExitError{Code: cli.ExitUsage, Err: err}
+	if done, err := cli.Parse(fs, args, "jeep-research", stdout, &common); err != nil || done {
+		return err
 	}
 
-	if showVersion {
-		fmt.Fprintf(stdout, "jeep-research %s\n", version.String())
-		return nil
-	}
-
-	cfg := config.Load()
-	if !quiet && cfg.Quiet {
-		quiet = true
-	}
-	if region == "global" && !fs.Changed("region") && cfg.Region != "" {
-		region = cfg.Region
-	}
-	if project == "" && cfg.Project != "" {
-		project = cfg.Project
-	}
-	if project == "" {
-		project = gcp.ResolveProject()
-	}
-	if project == "" {
-		return cli.Exitf(cli.ExitConfig, "could not determine GCP project; set GOOGLE_CLOUD_PROJECT or pass --project")
+	cfg, err := cli.ResolveCommon(fs, &common.Project, &common.Region, &common.Quiet)
+	if err != nil {
+		return err
 	}
 
 	prompt, err := cli.ResolvePrompt(fs.Args())
@@ -79,30 +42,31 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if agent == "" {
-		agent = config.ResolveModel("RESEARCH")
+		agent = config.ResolveModelWithConfig(cfg, "RESEARCH")
 	}
 
-	if dryRun {
+	if common.DryRun {
 		info := &cli.DryRunInfo{
 			Tool:      "jeep-research",
 			Model:     agent,
-			Project:   project,
-			Region:    region,
+			Project:   common.Project,
+			Region:    common.Region,
 			PromptLen: len(prompt),
 		}
-		return info.Print(stdout, format)
+		return info.Print(stdout, common.Format)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), common.Timeout)
 	defer cancel()
 
-	client, err := interactions.NewClient(ctx, project, region)
+	client, err := interactions.NewClient(ctx, common.Project, common.Region)
 	if err != nil {
 		return cli.Exitf(cli.ExitConfig, "%w", err)
 	}
+	client.Retries = common.Retries
 
 	var onStatus func(string)
-	if !quiet {
+	if !common.Quiet {
 		onStatus = func(s string) { fmt.Fprintf(stderr, "%s\n", s) }
 	}
 
@@ -131,7 +95,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	wg.Wait()
 
-	switch format {
+	switch common.Format {
 	case "json":
 		out := researchOutput{
 			Text:    report,
@@ -168,7 +132,7 @@ type researchOutput struct {
 	Text         string                `json:"text"`
 	Agent        string                `json:"agent"`
 	Status       string                `json:"status"`
-	Sources      []interactions.Source  `json:"sources,omitempty"`
+	Sources      []interactions.Source `json:"sources,omitempty"`
 	InputTokens  int                   `json:"input_tokens,omitempty"`
 	OutputTokens int                   `json:"output_tokens,omitempty"`
 }

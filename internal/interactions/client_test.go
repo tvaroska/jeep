@@ -20,6 +20,7 @@ func testClient(t *testing.T, handler http.Handler) *Client {
 		baseURL:        srv.URL,
 		httpClient:     srv.Client(),
 		initialBackoff: 10 * time.Millisecond,
+		retryBackoff:   time.Millisecond,
 	}
 }
 
@@ -148,6 +149,71 @@ func TestRunAndWait(t *testing.T) {
 	}
 }
 
+func TestCreateRetryOn429(t *testing.T) {
+	var attempts atomic.Int32
+	client := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n <= 2 {
+			w.WriteHeader(429)
+			w.Write([]byte("rate limited"))
+			return
+		}
+		json.NewEncoder(w).Encode(Interaction{ID: "int-retry", Status: "in_progress"})
+	}))
+	client.Retries = 3
+
+	interaction, err := client.Create(context.Background(), &CreateRequest{Input: "test"})
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if interaction.ID != "int-retry" {
+		t.Errorf("id = %q", interaction.ID)
+	}
+	if got := int(attempts.Load()); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+func TestCreateNoRetryOn403(t *testing.T) {
+	var attempts atomic.Int32
+	client := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(403)
+		w.Write([]byte("forbidden"))
+	}))
+	client.Retries = 3
+
+	_, err := client.Create(context.Background(), &CreateRequest{Input: "test"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := int(attempts.Load()); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry on 403)", got)
+	}
+}
+
+func TestGetRetryOn503(t *testing.T) {
+	var attempts atomic.Int32
+	client := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.WriteHeader(503)
+			w.Write([]byte("unavailable"))
+			return
+		}
+		json.NewEncoder(w).Encode(Interaction{ID: "int-1", Status: "completed"})
+	}))
+	client.Retries = 2
+
+	interaction, err := client.Get(context.Background(), "int-1")
+	if err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
+	}
+	if interaction.Status != "completed" {
+		t.Errorf("status = %q", interaction.Status)
+	}
+}
+
 func TestReportText_OutputText(t *testing.T) {
 	i := &Interaction{OutputText: "from output_text"}
 	if got := i.ReportText(); got != "from output_text" {
@@ -171,5 +237,31 @@ func TestReportText_Empty(t *testing.T) {
 	i := &Interaction{}
 	if got := i.ReportText(); got != "" {
 		t.Errorf("ReportText() = %q, want empty", got)
+	}
+}
+
+func TestSources(t *testing.T) {
+	i := &Interaction{
+		Steps: []Step{
+			{Content: []Content{{Annotations: []Annotation{
+				{Type: "url_citation", URL: "https://a.example", Title: "A"},
+				{Type: "url_citation", URL: "https://a.example", Title: "A dup"}, // deduped
+				{Type: "other", URL: "https://ignored.example"},                  // wrong type
+				{Type: "url_citation", URL: ""},                                  // empty URL
+			}}}},
+			{Content: []Content{{Annotations: []Annotation{
+				{Type: "url_citation", URL: "https://b.example", Title: "B"},
+			}}}},
+		},
+	}
+	got := i.Sources()
+	if len(got) != 2 {
+		t.Fatalf("sources = %d, want 2", len(got))
+	}
+	if got[0].URL != "https://a.example" || got[0].Title != "A" {
+		t.Errorf("sources[0] = %+v", got[0])
+	}
+	if got[1].URL != "https://b.example" {
+		t.Errorf("sources[1] = %+v", got[1])
 	}
 }

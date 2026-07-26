@@ -6,24 +6,30 @@ builds:
     binary: jeep
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    ldflags: &ldflags
+      - -s -w
+      - -X github.com/tvaroska/jeep/internal/version.Version={{ .Version }}
 
   - id: jeep-image
     main: ./cmd/jeep-image
     binary: jeep-image
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    ldflags: *ldflags
 
   - id: jeep-tts
     main: ./cmd/jeep-tts
     binary: jeep-tts
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    ldflags: *ldflags
 
   - id: jeep-research
     main: ./cmd/jeep-research
     binary: jeep-research
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    ldflags: *ldflags
 
 archives:
   - format: tar.gz

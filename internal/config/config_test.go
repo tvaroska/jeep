@@ -71,6 +71,23 @@ func TestResolveModel_FromConfig(t *testing.T) {
 	}
 }
 
+func TestResolveModelWithConfig(t *testing.T) {
+	t.Setenv("JEEP_MODEL_TEXT", "")
+	cfg := &Config{Models: map[string]string{"text": "cfg-model"}}
+	got := ResolveModelWithConfig(cfg, "TEXT")
+	if got != "cfg-model" {
+		t.Errorf("ResolveModelWithConfig(TEXT) = %q, want cfg-model", got)
+	}
+}
+
+func TestResolveModelWithConfig_NilConfig(t *testing.T) {
+	t.Setenv("JEEP_MODEL_TEXT", "")
+	got := ResolveModelWithConfig(nil, "TEXT")
+	if got != "gemini-3.5-flash" {
+		t.Errorf("ResolveModelWithConfig(nil, TEXT) = %q, want gemini-3.5-flash", got)
+	}
+}
+
 func TestResolveModel_EnvOverridesConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

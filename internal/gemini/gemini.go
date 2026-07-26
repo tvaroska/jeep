@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tvaroska/jeep/internal/retry"
 	"google.golang.org/genai"
 )
 
@@ -69,8 +69,14 @@ type FileInput struct {
 	Path string
 }
 
+type JSONMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type JSONRequest struct {
 	Prompt      string          `json:"prompt"`
+	Messages    []JSONMessage   `json:"messages,omitempty"`
 	Model       string          `json:"model,omitempty"`
 	System      string          `json:"system,omitempty"`
 	Project     string          `json:"project,omitempty"`
@@ -118,6 +124,11 @@ func (r *JSONRequest) FileInputs() []FileInput {
 	return JSONFileInputsToFileInputs(r.Files)
 }
 
+// ParseFileInputs parses -f values into named FileInputs. A value is treated as
+// "name=path" only when the text before the first '=' looks like a bare label:
+// it must not be a gs:// URI and must contain no '/' or '.'. This avoids
+// misreading paths and URIs that legitimately contain '=' (e.g. "gs://b/k=v" or
+// "dir/f=n.jpg"). Values without an explicit name get a 1-based auto index.
 func ParseFileInputs(files []string) []FileInput {
 	var inputs []FileInput
 	autoIdx := 1
@@ -173,6 +184,13 @@ func BuildFileParts(fi FileInput) ([]*genai.Part, error) {
 
 	path := fi.Path
 	switch {
+	case path == "-":
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return nil, fmt.Errorf("reading stdin: %w", err)
+		}
+		mime := http.DetectContentType(data[:min(512, len(data))])
+		parts = append(parts, genai.NewPartFromBytes(data, mime))
 	case isYouTubeURL(path):
 		parts = append(parts, genai.NewPartFromURI(path, "video/youtube"))
 	case strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://"):
@@ -241,7 +259,7 @@ func newClient(ctx context.Context, project, region string) (*genai.Client, erro
 	return client, nil
 }
 
-func buildAllFileParts(inputs []FileInput) ([]*genai.Part, error) {
+func BuildAllFileParts(inputs []FileInput) ([]*genai.Part, error) {
 	var parts []*genai.Part
 	for _, fi := range inputs {
 		fileParts, err := BuildFileParts(fi)
@@ -251,6 +269,35 @@ func buildAllFileParts(inputs []FileInput) ([]*genai.Part, error) {
 		parts = append(parts, fileParts...)
 	}
 	return parts, nil
+}
+
+func BuildContents(prompt string, messages []JSONMessage, fileParts []*genai.Part) []*genai.Content {
+	if len(messages) == 0 {
+		parts := append(fileParts, genai.NewPartFromText(prompt))
+		return []*genai.Content{{Role: "user", Parts: parts}}
+	}
+
+	var contents []*genai.Content
+	for _, m := range messages {
+		contents = append(contents, &genai.Content{
+			Role:  m.Role,
+			Parts: []*genai.Part{genai.NewPartFromText(m.Content)},
+		})
+	}
+
+	if prompt != "" {
+		contents = append(contents, &genai.Content{
+			Role:  "user",
+			Parts: []*genai.Part{genai.NewPartFromText(prompt)},
+		})
+	}
+
+	if len(fileParts) > 0 {
+		last := contents[len(contents)-1]
+		last.Parts = append(fileParts, last.Parts...)
+	}
+
+	return contents
 }
 
 func isRetryable(err error) bool {
@@ -264,35 +311,11 @@ func isRetryable(err error) bool {
 	return false
 }
 
-func withRetry(ctx context.Context, retries int, fn func() error) error {
-	var err error
-	for attempt := range retries + 1 {
-		err = fn()
-		if err == nil || !isRetryable(err) || attempt == retries {
-			return err
-		}
-		backoff := time.Duration(1<<attempt) * time.Second
-		jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff + jitter):
-		}
-	}
-	return err
-}
-
-func Generate(ctx context.Context, project, region, model, system, prompt string, inputs []FileInput, search bool, schema *genai.Schema, opts *GenerateOptions) (*GenerateResult, error) {
+func Generate(ctx context.Context, project, region, model, system string, contents []*genai.Content, search bool, schema *genai.Schema, opts *GenerateOptions) (*GenerateResult, error) {
 	client, err := newClient(ctx, project, region)
 	if err != nil {
 		return nil, err
 	}
-
-	parts, err := buildAllFileParts(inputs)
-	if err != nil {
-		return nil, err
-	}
-	parts = append(parts, genai.NewPartFromText(prompt))
 
 	config := &genai.GenerateContentConfig{}
 	if system != "" {
@@ -323,21 +346,36 @@ func Generate(ctx context.Context, project, region, model, system, prompt string
 	}
 
 	var resp *genai.GenerateContentResponse
-	err = withRetry(ctx, retries, func() error {
+	err = retry.Do(ctx, retries, time.Second, isRetryable, func() error {
 		var e error
-		resp, e = client.Models.GenerateContent(ctx, model,
-			[]*genai.Content{{Role: "user", Parts: parts}},
-			config,
-		)
+		resp, e = client.Models.GenerateContent(ctx, model, contents, config)
 		return e
 	})
 	if err != nil {
 		return nil, fmt.Errorf("generating content: %w", err)
 	}
 
-	result := &GenerateResult{
-		Model: resp.ModelVersion,
+	result := parseGenerateResult(resp)
+
+	var wg sync.WaitGroup
+	for i := range result.Sources {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			result.Sources[idx].URI = ResolveRedirect(result.Sources[idx].URI)
+		}(i)
 	}
+	wg.Wait()
+
+	return result, nil
+}
+
+// parseGenerateResult extracts text, usage, and deduplicated grounding sources
+// from a response. Sources are deduplicated by URI so that text and JSON output
+// stay consistent. It performs no network I/O (redirect resolution happens in
+// Generate), which keeps it unit-testable offline.
+func parseGenerateResult(resp *genai.GenerateContentResponse) *GenerateResult {
+	result := &GenerateResult{Model: resp.ModelVersion}
 
 	if resp.UsageMetadata != nil {
 		result.PromptTokens = resp.UsageMetadata.PromptTokenCount
@@ -345,6 +383,7 @@ func Generate(ctx context.Context, project, region, model, system, prompt string
 	}
 
 	var sb strings.Builder
+	seen := map[string]bool{}
 	for _, c := range resp.Candidates {
 		if result.FinishReason == "" {
 			result.FinishReason = string(c.FinishReason)
@@ -358,7 +397,8 @@ func Generate(ctx context.Context, project, region, model, system, prompt string
 		}
 		if c.GroundingMetadata != nil {
 			for _, chunk := range c.GroundingMetadata.GroundingChunks {
-				if chunk.Web != nil {
+				if chunk.Web != nil && chunk.Web.URI != "" && !seen[chunk.Web.URI] {
+					seen[chunk.Web.URI] = true
 					result.Sources = append(result.Sources, Source{
 						Title:  chunk.Web.Title,
 						URI:    chunk.Web.URI,
@@ -370,18 +410,7 @@ func Generate(ctx context.Context, project, region, model, system, prompt string
 		}
 	}
 	result.Text = sb.String()
-
-	var wg sync.WaitGroup
-	for i := range result.Sources {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			result.Sources[idx].URI = ResolveRedirect(result.Sources[idx].URI)
-		}(i)
-	}
-	wg.Wait()
-
-	return result, nil
+	return result
 }
 
 type ImageResult struct {
@@ -397,7 +426,7 @@ func GenerateImage(ctx context.Context, project, region, model, prompt string, i
 		return nil, err
 	}
 
-	parts, err := buildAllFileParts(inputs)
+	parts, err := BuildAllFileParts(inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +437,7 @@ func GenerateImage(ctx context.Context, project, region, model, prompt string, i
 	}
 
 	var resp *genai.GenerateContentResponse
-	err = withRetry(ctx, retries, func() error {
+	err = retry.Do(ctx, retries, time.Second, isRetryable, func() error {
 		var e error
 		resp, e = client.Models.GenerateContent(ctx, model,
 			[]*genai.Content{{Role: "user", Parts: parts}},
@@ -420,6 +449,10 @@ func GenerateImage(ctx context.Context, project, region, model, prompt string, i
 		return nil, fmt.Errorf("generating content: %w", err)
 	}
 
+	return parseImageResult(resp)
+}
+
+func parseImageResult(resp *genai.GenerateContentResponse) (*ImageResult, error) {
 	imgResult := &ImageResult{ModelVersion: resp.ModelVersion}
 	for _, c := range resp.Candidates {
 		if c.Content == nil {
@@ -464,7 +497,7 @@ func GenerateSpeech(ctx context.Context, project, region, model, voice, prompt s
 	}
 
 	var resp *genai.GenerateContentResponse
-	err = withRetry(ctx, retries, func() error {
+	err = retry.Do(ctx, retries, time.Second, isRetryable, func() error {
 		var e error
 		resp, e = client.Models.GenerateContent(ctx, model,
 			[]*genai.Content{{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(prompt)}}},
@@ -476,6 +509,10 @@ func GenerateSpeech(ctx context.Context, project, region, model, voice, prompt s
 		return nil, fmt.Errorf("generating speech: %w", err)
 	}
 
+	return parseSpeechResult(resp)
+}
+
+func parseSpeechResult(resp *genai.GenerateContentResponse) (*SpeechResult, error) {
 	for _, c := range resp.Candidates {
 		if c.Content == nil {
 			continue

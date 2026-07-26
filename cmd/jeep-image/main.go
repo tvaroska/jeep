@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,75 +12,39 @@ import (
 	flag "github.com/spf13/pflag"
 	"github.com/tvaroska/jeep/internal/cli"
 	"github.com/tvaroska/jeep/internal/config"
-	"github.com/tvaroska/jeep/internal/gcp"
 	"github.com/tvaroska/jeep/internal/gemini"
-	"github.com/tvaroska/jeep/internal/version"
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "jeep-image: %v\n", err)
-		code := 1
-		var exitErr *cli.ExitError
-		if errors.As(err, &exitErr) {
-			code = exitErr.Code
-		}
-		os.Exit(code)
-	}
+	cli.RunMain("jeep-image", run)
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	var model, project, region, output, format string
-	var showVersion, quiet, dryRun, listModels bool
-	var timeout time.Duration
+	var model, output string
+	var listModels bool
 	var files []string
-	var retries int
+	var common cli.CommonFlags
 
-	fs := flag.NewFlagSet("jeep-image", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := cli.NewFlagSet("jeep-image", stderr)
+	common.Register(fs, 5*time.Minute)
 	fs.StringVar(&model, "model", "", "Model name")
-	fs.StringVar(&project, "project", "", "GCP project (default: auto-detect)")
-	fs.StringVar(&region, "region", "global", "Vertex AI region")
 	fs.StringVarP(&output, "output", "o", "output.png", "Output file path")
-	fs.StringVar(&format, "format", "text", "Output format: text or json")
-	fs.BoolVarP(&quiet, "quiet", "q", false, "Suppress stderr messages")
-	fs.BoolVar(&dryRun, "dry-run", false, "Show what would be sent without making the API call")
 	fs.BoolVar(&listModels, "list-models", false, "List available models and exit")
-	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
-	fs.DurationVar(&timeout, "timeout", 5*time.Minute, "Request timeout")
 	fs.StringArrayVarP(&files, "file", "f", nil, "Reference image (repeatable)")
-	fs.IntVar(&retries, "retry", 0, "Retry transient errors with exponential backoff")
 	fs.Usage = func() { printUsage(fs, stderr) }
-	if err := fs.Parse(args); err != nil {
-		return &cli.ExitError{Code: cli.ExitUsage, Err: err}
+	if done, err := cli.Parse(fs, args, "jeep-image", stdout, &common); err != nil || done {
+		return err
 	}
 
-	if showVersion {
-		fmt.Fprintf(stdout, "jeep-image %s\n", version.String())
-		return nil
-	}
-
-	cfg := config.Load()
-	if !quiet && cfg.Quiet {
-		quiet = true
-	}
-	if region == "global" && !fs.Changed("region") && cfg.Region != "" {
-		region = cfg.Region
-	}
-	if project == "" && cfg.Project != "" {
-		project = cfg.Project
-	}
-	if project == "" {
-		project = gcp.ResolveProject()
-	}
-	if project == "" {
-		return cli.Exitf(cli.ExitConfig, "could not determine GCP project; set GOOGLE_CLOUD_PROJECT or pass --project")
+	cfg, err := cli.ResolveCommon(fs, &common.Project, &common.Region, &common.Quiet)
+	if err != nil {
+		return err
 	}
 
 	if listModels {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), common.Timeout)
 		defer cancel()
-		return printModels(ctx, stdout, project, region, format)
+		return cli.PrintModels(ctx, stdout, common.Project, common.Region, common.Format)
 	}
 
 	prompt, err := cli.ResolvePrompt(fs.Args())
@@ -90,12 +53,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if model == "" {
-		model = config.ResolveModel("IMAGE")
+		model = config.ResolveModelWithConfig(cfg, "IMAGE")
 	}
 
 	inputs := gemini.ParseFileInputs(files)
 
-	if dryRun {
+	if common.DryRun {
 		var dryFiles []cli.DryRunFile
 		for _, fi := range inputs {
 			dryFiles = append(dryFiles, cli.DryRunFile{Name: fi.Name, Path: fi.Path})
@@ -103,18 +66,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 		info := &cli.DryRunInfo{
 			Tool:      "jeep-image",
 			Model:     model,
-			Project:   project,
-			Region:    region,
+			Project:   common.Project,
+			Region:    common.Region,
 			PromptLen: len(prompt),
 			Files:     cli.ResolveDryRunFiles(dryFiles),
 		}
-		return info.Print(stdout, format)
+		return info.Print(stdout, common.Format)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), common.Timeout)
 	defer cancel()
 
-	result, err := gemini.GenerateImage(ctx, project, region, model, prompt, inputs, retries)
+	result, err := gemini.GenerateImage(ctx, common.Project, common.Region, model, prompt, inputs, common.Retries)
 	if err != nil {
 		return cli.Exitf(cli.ExitAPI, "%w", err)
 	}
@@ -122,7 +85,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	ext := extFromMIME(result.MIMEType)
 	if ext != "" && filepath.Ext(output) == "" {
 		output += ext
-	} else if ext != "" && filepath.Ext(output) != ext && !quiet {
+	} else if ext != "" && filepath.Ext(output) != ext && !common.Quiet {
 		fmt.Fprintf(stderr, "Warning: model returned %s but output file is %s\n", result.MIMEType, filepath.Ext(output))
 	}
 
@@ -130,7 +93,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cli.Exitf(cli.ExitIO, "writing output: %w", err)
 	}
 
-	switch format {
+	switch common.Format {
 	case "json":
 		out := struct {
 			Output   string `json:"output"`
@@ -151,31 +114,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("encoding output: %w", err)
 		}
 	default:
-		if !quiet {
+		if !common.Quiet {
 			fmt.Fprintf(stderr, "Saved %s (%d bytes)\n", output, len(result.Data))
 		}
 		if result.Text != "" {
 			fmt.Fprintln(stdout, result.Text)
-		}
-	}
-	return nil
-}
-
-func printModels(ctx context.Context, w io.Writer, project, region, format string) error {
-	models, err := gemini.ListModels(ctx, project, region)
-	if err != nil {
-		return cli.Exitf(cli.ExitAPI, "%w", err)
-	}
-	if format == "json" {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(models)
-	}
-	for _, m := range models {
-		if m.DisplayName != "" {
-			fmt.Fprintf(w, "%-40s %s\n", m.Name, m.DisplayName)
-		} else {
-			fmt.Fprintln(w, m.Name)
 		}
 	}
 	return nil
