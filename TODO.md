@@ -81,7 +81,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: move audi `internal/pipeline` — resumable content-addressed cache (narration/segments/chapters), ffmpeg concat + per-segment EBU R128 loudnorm, adaptive re-split on the 400 classification, per-chapter manifest. Swap the Synthesizer to the shared `gemini` client; drive off `Sections` not pages.
   - Accept: an integration test on a tiny fixture (few short sections, fake gemini + real ffmpeg) produces a manifest + a normalized MP3 whose integrated loudness is within tolerance of -16 LUFS (ffprobe/loudnorm); a fake 400 triggers one re-split; re-run reuses cache; `go test ./...` green.
 
-- [ ] S1-ab-9 `cmd/jeep-audiobook` on `internal/cli` + `internal/config`
+- [x] S1-ab-9 `cmd/jeep-audiobook` on `internal/cli` + `internal/config` _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-8.
   - Scope: wire the CLI on jeep's pflag `internal/cli` (RunMain/CommonFlags/Exitf) + `internal/config`. Flag parity: voice, style, resume, chapters, from/to-page, concurrency, output.
   - Accept: `go run ./cmd/jeep-audiobook --help` lists the flags; a dry-run on the test PDF prints the planned chapters without calling the model; binary builds; `go test ./...` green.
