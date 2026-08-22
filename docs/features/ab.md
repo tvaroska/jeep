@@ -422,3 +422,100 @@ Per spine document, XHTML is parsed to extract visible text (collapsed whitespac
 - **encoding/xml namespace matching:** A struct tag without a namespace (e.g., `xml:"item"`) matches that local name in ANY namespace. For Dublin Core metadata use `xml:"metadata>title"` and `xml:"metadata>creator"`.
 - **epub:type attribute in x/net/html:** Appears as `Attr.Key == "epub:type"` (the HTML parser doesn't split the namespace prefix). Match on the raw key containing `toc` as a substring.
 - **Best-effort degradation:** Missing images, unresolvable TOC hrefs, or absent nav/NCX must log a warning and continue, never error out. Hard errors are limited to: cannot open zip, no container.xml, no OPF, or empty spine.
+
+---
+
+## Figure Description + Listening Adaptation (describe package)
+
+**Built:** 2026-08-22 (S1-ab-6)
+
+### What Was Built
+
+Ported audi's `internal/describe` package (figure description, inline weaving, and listening adaptation) into jeep, routing every LLM call through `gemini.Generate` with structured-JSON response schemas. This replaces audi's hand-rolled genai plumbing (`callWithRetry`, `isRetryableGenAI`, `NewGemini*` factories) with jeep's reusable client infrastructure.
+
+The package provides three capabilities:
+1. **Figure description:** `Describer` seam converts image bytes + surrounding context into spoken descriptions via LLM
+2. **Listening adaptation:** `Preparer` seam rewrites extracted text to flow naturally for audio narration, with critical **artifact-repair guidance** for fixing PDF extraction issues
+3. **Inline weaving:** `Weaver` orchestrates concurrent figure description across a page's images and splices results into the prose at correct reference points
+
+### The Generator Seam
+
+`internal/describe` cannot import `internal/gemini` and inject a fake into a real `*gemini.Client` because `gemini.Client.models` (the `contentGenerator` field) is unexported. The solution is a describe-local `generator` interface matching `gemini.Client.Generate`'s exact signature:
+
+```go
+type generator interface {
+    Generate(ctx context.Context, model, system string, contents []*genai.Content,
+        search bool, schema *genai.Schema, opts *gemini.GenerateOptions) (*gemini.GenerateResult, error)
+}
+```
+
+`*gemini.Client` satisfies this structurally. Tests supply a `fakeGenerator` that returns scripted `GenerateResult`s with JSON-formatted `Text` fields, enabling full unit test coverage without network calls.
+
+### Structured JSON Wrapping
+
+Both `Describer` and `Preparer` pass a `genai.Schema` to `gemini.Generate`:
+- **Describer:** `{Type: TypeObject, Properties: {"description": {Type: TypeString}}, Required: ["description"]}`
+- **Preparer:** `{Type: TypeObject, Properties: {"narration": {Type: TypeString}}, Required: ["narration"]}`
+
+`gemini.Generate` sets `ResponseMIMEType="application/json"` + `ResponseSchema` when `schema != nil`. The returned `GenerateResult.Text` is the JSON string, which must be `json.Unmarshal`ed into a struct to extract the actual text. Do NOT return `res.Text` raw — it would be a JSON blob, not narration.
+
+### Artifact-Repair Prompt (Load-Bearing)
+
+The `defaultPrepareSystemPrompt` was extended with explicit instructions to repair PDF extraction artifacts:
+- Re-join words split across line wraps (hyphenation/mid-word breaks)
+- Restore dropped leading letters and ligatures at word starts (e.g., `unied`→`unified`, `ree pillars`→`three pillars`, dropped `The`/`Th`/`fi` restored)
+- Do this WITHOUT changing meaning, summarizing, or inventing content
+
+This guidance is the validated solution from the phase-0 spike for fixing ledongthuc text quality issues. A unit test asserts the exported constant contains "ligature" or "line" to prevent accidental deletion.
+
+### Key Design Decisions
+
+**Local interface is mandatory:** The `generator` seam is not an optimization — it's the only way to fake `gemini.Client` from an external package. This pattern should be reused in other packages that need to test against Gemini (e.g., pipeline, map-reduce).
+
+**No ThinkingConfig in jeep:** audi disabled thinking (`ThinkingBudget:0`) so reasoning tokens wouldn't eat `MaxOutputTokens` and truncate the rewrite. jeep's `GenerateOptions` has no such field, and adding one would modify CRITICAL `internal/gemini`. Instead, prepare's `MaxTokens` is left unset (0) so no output cap is imposed and the model's default budget applies. The existing ~6000-char chunking keeps each rewrite small. If real runs later show truncation, a follow-up task should PROPOSE adding a thinking-budget knob — do not sneak it in.
+
+**Changed retry semantics:** jeep retries only 429/500/503 via `isRetryable` in `gemini.go`; audi also retried 502/504 and `context.DeadlineExceeded`. This is the accepted jeep convention. Retries are driven via `GenerateOptions.Retries` (default 4). Tests verify a 400 (`genai.APIError{Code:400}`) is NOT retried (call count == 1).
+
+**No factory functions:** Unlike audi's `NewGeminiDescriber(cfg, gcp.Clients, ...)`, jeep has no constructors. CLI wiring (S1-ab-9) constructs adapters directly with a `*gemini.Client` and sets fields. This eliminates the `config`/`gcp` dependency cycle and simplifies the package.
+
+**Weave + chunk logic ported byte-for-byte:** The pure-Go orchestrator (`Weaver`, `weaveItem`, `chunkForPrepare`, `splitLong`) is unchanged from audi except for import path rewrites. It is already correct, unit-tested for concurrency and reading order, and has no genai dependencies. Re-deriving risks regression.
+
+### Token Usage Recording
+
+Both `GeminiDescriber` and `GeminiPreparer` hold an optional `Usage *usage.Tracker` field. After each `Generate` call, they record:
+
+```go
+g.Usage.Record(g.Model, int64(res.PromptTokens), int64(res.OutputTokens), int64(res.PromptTokens+res.OutputTokens))
+```
+
+`GenerateResult` has NO `TotalTokens` field — only `PromptTokens` and `OutputTokens` (int32). Total is computed as prompt+output. `usage.Record` is nil-safe, so an unset `Usage` field is fine.
+
+### Verification
+
+- Describe unit test feeds `fakeGenerator` returning `{"description":"a chart"}`, asserts parsed string
+- Prepare unit test feeds `{"narration":"adapted text"}`, asserts parsed/rejoined string across chunks
+- Retry test scripts one 503 then success, asserts `fake.calls == 2`
+- Fatal test scripts `genai.APIError{Code:400}`, asserts `fake.calls == 1` (no retry)
+- Artifact-repair test asserts the real exported `defaultPrepareSystemPrompt` constant contains "ligature" or "line"
+- Full suite: `go build ./... && go vet ./... && go test ./...` all green
+- Pure-Go: `CGO_ENABLED=0 go build ./...` exits 0
+- `go mod tidy` promotes only `golang.org/x/sync` to direct require (already in go.sum as indirect)
+- `git diff --stat` shows no files under `internal/gemini/` (kept off CRITICAL)
+
+### Files Created
+
+- `internal/describe/images.go` — `Describer` interface, `GeminiDescriber` + `StubDescriber` adapters, `Weaver` orchestrator
+- `internal/describe/prepare.go` — `Preparer` interface, `GeminiPreparer` + `StubPreparer` adapters, chunking logic
+- `internal/describe/images_test.go` — Describe/Weave tests, retry/fatal, usage recording
+- `internal/describe/prepare_test.go` — Prepare tests, concurrency, artifact-repair assertion
+- `go.mod`/`go.sum` — promoted `golang.org/x/sync/errgroup` from indirect to direct
+
+### Gotchas
+
+**JSON schema required in tests:** Test fakes MUST return valid JSON matching the schema (e.g., `{"description":"text"}`, NOT just `"text"`), or unmarshal will fail. This is different from audi's `fakeModels` which returned raw `genai.GenerateContentResponse` with text parts.
+
+**Retries tested indirectly:** The describe package does NOT test retry counts (that's `gemini`'s responsibility). Tests verify a 400 error propagates without retry by checking `fake.calls == 1`. The 503 retry path is tested by scripting one 503 then success and asserting `calls == 2`.
+
+**Artifact-repair guidance is in the prompt:** It's a string constant, not a runtime flag. Tests assert its presence. Do not dilute or remove this guidance — the phase-0 spike validated it as the solution to PDF text quality issues.
+
+**ImageRef stays primitives-only:** The `ImageRef` struct (used by Weaver) imports no other jeep packages. The S1-ab-8 pipeline maps `ingest.Block(Figure)` → `ImageRef` at the call site; describe must not depend on `ingest`.
