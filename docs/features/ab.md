@@ -316,3 +316,56 @@ by that page's figure blocks, interleaving prose + figures by page.
   emitted bytes are still valid, so dimensions are ignored here.
 - **Package name is `pdfsource`, not `pdf`** — `pdf` collides with the ledongthuc
   import. It lives outside `internal/ingest` to keep that package dependency-free.
+
+---
+
+## ePub Source Adapter (pure-Go stack)
+
+**Built:** 2026-08-22 (S1-ab-4)
+
+### What Was Built
+
+`internal/epubsource` implements the `ingest.Source` seam for ePub files on a CGO-free stack, producing an `*ingest.Document` that `ingest.Structure` consumes unchanged. The adapter combines pure-Go primitives to extract structure and content:
+
+- **Container + OPF parsing:** `archive/zip` to open the `.epub`, `encoding/xml` to parse the OPF (metadata, manifest, spine)
+- **TOC → section tree:** EPUB3 nav document (XHTML with `<nav epub:type="toc">`) preferred; EPUB2 NCX fallback (`application/x-dtbncx+xml`); per-spine-doc fallback when both absent
+- **XHTML content → blocks:** `golang.org/x/net/html` to parse each spine document, extracting prose and embedded images as `ingest.Block`s in reading order
+
+All ePub-specific dependencies live ONLY in this adapter; `internal/ingest` stays dependency-free.
+
+### Spine-Index-Span Mapping (Reuses PDF Algorithm)
+
+The TOC→section tree-building mirrors `pdfsource`'s page-span DFS algorithm, substituting **0-based spine index** for page number. Each TOC node's href resolves to a spine document index. The node's content span is `[start, nextStart-1]` where `nextStart` is the next node's start in pre-order DFS (first child, else next sibling, else nearest ancestor's next sibling). The last node runs to `len(spine)-1`. Two TOC entries pointing at the same file yield an empty span for the earlier node, so content is never double-counted.
+
+Per spine document, XHTML is parsed to extract visible text (collapsed whitespace from HTML layout) and `<img>` elements. Images are resolved relative to the XHTML's directory, read from the zip, and emitted as `BlockFigure` with MIME type from the OPF manifest. Prose and figures interleave in reading order.
+
+### Design Decisions
+
+- **EPUB3 nav → NCX → per-spine fallback:** The nav document (identified by manifest `properties~="nav"`) is parsed first for its `<ol>/<li>` tree. If absent or unparseable, the NCX (referenced by `spine toc=` or manifest media-type) is tried. If neither works, the adapter emits one top-level section per spine document with title from XHTML `<title>`, first `<h1>`/`<h2>`, or `"Section N"`. This differs from PDF's single-section fallback — the spine provides natural chapter boundaries, making it a more useful fallback.
+  
+- **Fragment-level splitting deferred:** TOC hrefs like `ch1.xhtml#part2` have the fragment stripped before mapping to a spine document. The entire document's content is assigned to the section. Fragment-level splitting (using `#id` anchors to split a single spine doc into subsections) is out of scope for v1.
+
+- **golang.org/x/net/html for XHTML parsing:** `encoding/xml` is fragile with HTML entities (`&nbsp;`) and non-strict markup. `x/net/html` is the robust, pure-Go, CGO-free choice. It was already present as an indirect dependency (`v0.57.0`), so using it promoted it to a direct require via `go mod tidy` — no new download.
+
+- **Front matter before first TOC entry dropped:** Spine indices before the first TOC node's start are discarded (mirrors PDF behavior). These are typically cover/copyright/ToC pages that `ingest.Structure` would filter anyway.
+
+### Verification
+
+- Five test cases cover the adapter: EPUB3 nav tree building, embedded image extraction (with reading-order interleave), NCX fallback, no-TOC per-spine fallback, and href-with-fragment-and-subdir resolution.
+- The nav test exercises `ingest.Structure(doc)` to prove the produced tree flows through the downstream chapterizer unchanged, yielding chapters with non-empty prose blocks.
+- `CGO_ENABLED=0 go build ./...` confirms pure-Go requirement.
+
+### Files Created
+
+- `internal/epubsource/epubsource.go` — `Source`/`Load`, container/OPF/nav/NCX parsers, DFS spine-span tree builder, per-document XHTML extractor
+- `internal/epubsource/epubsource_test.go` — programmatically-built fixtures (no committed `.epub` binaries), five test cases
+- `go.mod`/`go.sum` — promoted `golang.org/x/net` to direct dependency
+
+### Gotchas
+
+- **Relative href bases differ per context:** OPF hrefs are relative to the OPF's directory; nav/NCX hrefs are relative to the nav/NCX file's directory; `<img src>` is relative to the containing XHTML's directory. Do NOT use one base for all three — always `path.Clean(path.Join(dir, url.PathUnescape(href)))`.
+- **Strip fragments before resolving:** `strings.SplitN(href, "#", 2)[0]` before mapping to a spine index. Otherwise `ch1.xhtml#part2` won't match the spine entry `ch1.xhtml`.
+- **zip paths use forward slashes:** `zip.File.Name` is already slash-separated. Use the `path` package (not `filepath`) to avoid platform-specific separators.
+- **encoding/xml namespace matching:** A struct tag without a namespace (e.g., `xml:"item"`) matches that local name in ANY namespace. For Dublin Core metadata use `xml:"metadata>title"` and `xml:"metadata>creator"`.
+- **epub:type attribute in x/net/html:** Appears as `Attr.Key == "epub:type"` (the HTML parser doesn't split the namespace prefix). Match on the raw key containing `toc` as a substring.
+- **Best-effort degradation:** Missing images, unresolvable TOC hrefs, or absent nav/NCX must log a warning and continue, never error out. Hard errors are limited to: cannot open zip, no container.xml, no OPF, or empty spine.
