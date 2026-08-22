@@ -75,7 +75,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), common.Timeout)
 	defer cancel()
 
-	result, err := gemini.GenerateSpeech(ctx, common.Project, common.Region, model, voice, prompt, common.Retries)
+	result, err := gemini.GenerateSpeech(ctx, common.Project, common.Region, model, voice, "", prompt, common.Retries)
 	if err != nil {
 		return cli.Exitf(cli.ExitAPI, "%w", err)
 	}

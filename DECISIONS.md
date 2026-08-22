@@ -15,6 +15,41 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Reusable `internal/gemini` client + `GenerateSpeech` upgrade (S1-ab-1)
+
+**Task:** S1-ab-1 · **Area:** infra (SENSITIVE — touches `internal/gemini`)
+
+**Decision:** Introduced a long-lived `gemini.Client` (genai models seam + project/region)
+with `Generate`/`GenerateImage`/`GenerateSpeech` **methods**; the existing package-level
+funcs are now thin wrappers that construct a client and delegate, so `cmd/jeep`,
+`cmd/jeep-image`, and `cmd/jeep-research` are byte-for-byte unchanged at the call site.
+The genai boundary is now an injectable `contentGenerator` interface (matching
+`Models.GenerateContent`'s value-receiver signature), which finally makes the "fake client
+returns canned responses" seam in `design/seams.md` real — retry/400-classification/request
+building are now unit-tested without a network.
+
+`GenerateSpeech` gained three things the audiobook pipeline needs:
+1. **`style` param** — genai TTS has no style field, so a non-empty style is carried as the
+   leading text of the prompt (`style + "\n\n" + prompt`); empty style leaves the prompt
+   exactly unchanged. Its one caller (`cmd/jeep-tts`) passes `""` — behavior unchanged.
+2. **`IsInvalidInput(err)`** — exported classifier for Vertex `APIError{Code:400}` (unwraps
+   through `%w`). Mirrors audi's `IsInvalidArgument`; the S1-ab-8 pipeline uses it as the
+   adaptive re-split trigger. 400 is NOT in `isRetryable` (429/500/503 only), so it
+   propagates on the first attempt intact.
+3. **`PCMToMP3(ctx, pcm, sampleRate, channels)`** — ffmpeg (`libmp3lame -q:a 4`) over
+   stdin/stdout, encoding the raw `audio/L16` 24kHz mono PCM genai returns.
+
+**Gotchas:**
+- `Models.GenerateContent` has a **value** receiver, `client.Models` is `*Models`; both
+  satisfy the interface — store `gc.Models` (the pointer) directly, don't dereference.
+- The 503-retry unit test costs ~1.3s wall clock (retry base is 1s); kept retry counts small.
+- ffmpeg/ffprobe tests `t.Skip` when the binaries are absent so the suite stays green
+  off-environment; they are present here (`/usr/bin/ffmpeg` 6.1.1).
+- jeep-tts still writes WAV via its own `pcmToWAV`; MP3 consumption is deferred to the
+  audiobook pipeline (out of scope for this task).
+
+---
+
 ## 2026-08-22 — Fold `audi` (PDF→audiobook) into jeep as `jeep-audiobook`
 
 **Task:** S1-ab-* (planning) · **Area:** infra/feature

@@ -41,7 +41,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
 
 `S1-ab-0` (phase-0 spike: pure-Go PDF fidelity + genai-TTS parity) is **done** — see DECISIONS.md.
 
-- [ ] S1-ab-1 Reusable `internal/gemini` client + upgrade `GenerateSpeech` (SENSITIVE: touches `internal/gemini`, auto-escalates)
+- [x] S1-ab-1 Reusable `internal/gemini` client + upgrade `GenerateSpeech` (SENSITIVE: touches `internal/gemini`, auto-escalates) _(done 2026-08-22; reviewed; see docs/features/*)_
   - Deps: none.
   - Scope: add a constructed long-lived `Client` (genai client + project/region) with `Generate`/`GenerateImage`/`GenerateSpeech` methods; keep package funcs as thin wrappers. Add to `GenerateSpeech`: (a) style-prompt prefix param, (b) PCM→MP3 encode (ffmpeg), (c) expose the oversized-input error so callers can classify `genai.APIError{Code:400}`.
   - Accept: `go build ./... && go vet ./... && go test ./...` green; existing jeep/jeep-image/jeep-research/jeep-tts still build+test green; unit test proves PCM→MP3 output is a valid MP3 (ffprobe positive duration), the style prefix reaches the request (fake client), and a 400 surfaces as a classifiable error while 429/500/503 still retry.

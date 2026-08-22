@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -259,6 +261,33 @@ func newClient(ctx context.Context, project, region string) (*genai.Client, erro
 	return client, nil
 }
 
+// contentGenerator is the seam at the genai Models.GenerateContent boundary.
+// *genai.Models satisfies it (GenerateContent has a value receiver on Models),
+// and tests inject a fake so the request-building, retry, and error-classification
+// logic can be exercised without a network call.
+type contentGenerator interface {
+	GenerateContent(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error)
+}
+
+// Client is a long-lived Gemini client shared across many calls. jeep-audiobook
+// makes thousands of TTS calls, so reusing one client (and its underlying HTTP
+// connections) avoids reconstructing a *genai.Client per request. project/region
+// are retained for parity with the package-level convenience funcs.
+type Client struct {
+	models  contentGenerator
+	project string
+	region  string
+}
+
+// NewClient builds a long-lived client backed by a real *genai.Client.
+func NewClient(ctx context.Context, project, region string) (*Client, error) {
+	gc, err := newClient(ctx, project, region)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{models: gc.Models, project: project, region: region}, nil
+}
+
 func BuildAllFileParts(inputs []FileInput) ([]*genai.Part, error) {
 	var parts []*genai.Part
 	for _, fi := range inputs {
@@ -311,12 +340,16 @@ func isRetryable(err error) bool {
 	return false
 }
 
+// Generate is a convenience wrapper that constructs a client then delegates.
 func Generate(ctx context.Context, project, region, model, system string, contents []*genai.Content, search bool, schema *genai.Schema, opts *GenerateOptions) (*GenerateResult, error) {
-	client, err := newClient(ctx, project, region)
+	c, err := NewClient(ctx, project, region)
 	if err != nil {
 		return nil, err
 	}
+	return c.Generate(ctx, model, system, contents, search, schema, opts)
+}
 
+func (c *Client) Generate(ctx context.Context, model, system string, contents []*genai.Content, search bool, schema *genai.Schema, opts *GenerateOptions) (*GenerateResult, error) {
 	config := &genai.GenerateContentConfig{}
 	if system != "" {
 		config.SystemInstruction = genai.NewContentFromText(system, "user")
@@ -346,9 +379,9 @@ func Generate(ctx context.Context, project, region, model, system string, conten
 	}
 
 	var resp *genai.GenerateContentResponse
-	err = retry.Do(ctx, retries, time.Second, isRetryable, func() error {
+	err := retry.Do(ctx, retries, time.Second, isRetryable, func() error {
 		var e error
-		resp, e = client.Models.GenerateContent(ctx, model, contents, config)
+		resp, e = c.models.GenerateContent(ctx, model, contents, config)
 		return e
 	})
 	if err != nil {
@@ -420,12 +453,16 @@ type ImageResult struct {
 	ModelVersion string
 }
 
+// GenerateImage is a convenience wrapper that constructs a client then delegates.
 func GenerateImage(ctx context.Context, project, region, model, prompt string, inputs []FileInput, retries int) (*ImageResult, error) {
-	client, err := newClient(ctx, project, region)
+	c, err := NewClient(ctx, project, region)
 	if err != nil {
 		return nil, err
 	}
+	return c.GenerateImage(ctx, model, prompt, inputs, retries)
+}
 
+func (c *Client) GenerateImage(ctx context.Context, model, prompt string, inputs []FileInput, retries int) (*ImageResult, error) {
 	parts, err := BuildAllFileParts(inputs)
 	if err != nil {
 		return nil, err
@@ -439,7 +476,7 @@ func GenerateImage(ctx context.Context, project, region, model, prompt string, i
 	var resp *genai.GenerateContentResponse
 	err = retry.Do(ctx, retries, time.Second, isRetryable, func() error {
 		var e error
-		resp, e = client.Models.GenerateContent(ctx, model,
+		resp, e = c.models.GenerateContent(ctx, model,
 			[]*genai.Content{{Role: "user", Parts: parts}},
 			config,
 		)
@@ -479,10 +516,24 @@ type SpeechResult struct {
 	ModelVersion string
 }
 
-func GenerateSpeech(ctx context.Context, project, region, model, voice, prompt string, retries int) (*SpeechResult, error) {
-	client, err := newClient(ctx, project, region)
+// GenerateSpeech is a convenience wrapper that constructs a client then delegates.
+func GenerateSpeech(ctx context.Context, project, region, model, voice, style, prompt string, retries int) (*SpeechResult, error) {
+	c, err := NewClient(ctx, project, region)
 	if err != nil {
 		return nil, err
+	}
+	return c.GenerateSpeech(ctx, model, voice, style, prompt, retries)
+}
+
+// GenerateSpeech synthesizes speech for prompt with the given prebuilt voice.
+// genai TTS has no dedicated style field, so a non-empty style is carried as the
+// leading text of the prompt (the model reads it as a delivery instruction). An
+// empty style leaves the prompt text unchanged. Errors are wrapped with %w so a
+// Vertex 400 stays classifiable via IsInvalidInput (the audiobook re-split trigger).
+func (c *Client) GenerateSpeech(ctx context.Context, model, voice, style, prompt string, retries int) (*SpeechResult, error) {
+	text := prompt
+	if style != "" {
+		text = style + "\n\n" + prompt
 	}
 
 	config := &genai.GenerateContentConfig{
@@ -497,10 +548,10 @@ func GenerateSpeech(ctx context.Context, project, region, model, voice, prompt s
 	}
 
 	var resp *genai.GenerateContentResponse
-	err = retry.Do(ctx, retries, time.Second, isRetryable, func() error {
+	err := retry.Do(ctx, retries, time.Second, isRetryable, func() error {
 		var e error
-		resp, e = client.Models.GenerateContent(ctx, model,
-			[]*genai.Content{{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(prompt)}}},
+		resp, e = c.models.GenerateContent(ctx, model,
+			[]*genai.Content{{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(text)}}},
 			config,
 		)
 		return e
@@ -524,6 +575,62 @@ func parseSpeechResult(resp *genai.GenerateContentResponse) (*SpeechResult, erro
 		}
 	}
 	return nil, fmt.Errorf("no audio returned by the model")
+}
+
+// IsInvalidInput reports whether err is a Vertex 400 (invalid/oversized input).
+// The audiobook pipeline uses this to trigger an adaptive re-split of a segment
+// that was too token-dense for the TTS model. It unwraps, so a wrapped error
+// (e.g. GenerateSpeech's "generating speech: %w") is still recognized. Unlike
+// isRetryable's 429/500/503, a 400 is never retried and propagates on the first
+// attempt, so callers see it immediately.
+func IsInvalidInput(err error) bool {
+	var apiErr genai.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == 400
+}
+
+// ffmpegBin is the ffmpeg executable resolved from PATH. It is a var so the
+// dependency is explicit (and overridable in tests if ever needed).
+var ffmpegBin = "ffmpeg"
+
+// PCMToMP3 encodes raw signed 16-bit little-endian PCM to MP3 bytes via ffmpeg.
+// genai TTS returns audio/L16 at 24000 Hz mono, so callers pass sampleRate=24000,
+// channels=1. It streams PCM in on stdin and reads MP3 out from stdout; ffmpeg
+// must be on PATH. An empty pcm slice is rejected before invoking ffmpeg.
+func PCMToMP3(ctx context.Context, pcm []byte, sampleRate, channels int) ([]byte, error) {
+	if len(pcm) == 0 {
+		return nil, fmt.Errorf("encoding mp3: empty PCM input")
+	}
+
+	cmd := exec.CommandContext(ctx, ffmpegBin,
+		"-hide_banner", "-nostdin",
+		"-f", "s16le",
+		"-ar", fmt.Sprintf("%d", sampleRate),
+		"-ac", fmt.Sprintf("%d", channels),
+		"-i", "pipe:0",
+		"-c:a", "libmp3lame", "-q:a", "4",
+		"-f", "mp3", "pipe:1",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdin = bytes.NewReader(pcm)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("encoding mp3: %w: %s", err, tailString(stderr.String(), 500))
+	}
+	if stdout.Len() == 0 {
+		return nil, fmt.Errorf("encoding mp3: ffmpeg produced no output: %s", tailString(stderr.String(), 500))
+	}
+	return stdout.Bytes(), nil
+}
+
+// tailString returns the last maxBytes bytes of s, or all of s if shorter. Used
+// to keep the tail of ffmpeg's stderr in error messages without dumping it all.
+func tailString(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	return s[len(s)-maxBytes:]
 }
 
 func ResolveRedirect(rawURL string) string {
