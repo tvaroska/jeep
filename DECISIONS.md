@@ -15,6 +15,32 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — audi "archive" resolved: no standalone repo; deprecated in monorepo (S0-infra-1)
+
+**Task:** S0-infra-1 · **Area:** ops/docs (external repo deprecation + bookkeeping; NO jeep code changes)
+
+**Finding:** The task premise "archive the audi GitHub repo (`github.com/tvaroska/learning/audi`)" was false. Verified 2026-08-22 with `gh` (authenticated as `tvaroska`):
+- **No standalone `tvaroska/audi` repository exists** (`gh repo view tvaroska/audi` → GraphQL error: "Could not resolve to a Repository").
+- `audi` is a **plain subdirectory** of the private monorepo `tvaroska/learning` (`git -C /home/boris/learning/audi rev-parse --show-toplevel` → `/home/boris/learning`; no `audi/.git`).
+- `tvaroska/learning` is a **PRIVATE monorepo** containing ~30 unrelated projects (agents, coffee, loans, robotics, vertex, insurance, k8s, ma, ...).
+- The literal task "archive the audi repo" is **not executable as written** because the object it names does not exist as a repo.
+
+**Decision:** Reject the catastrophically wrong `gh repo archive tvaroska/learning` (would flip the ENTIRE monorepo to read-only, affecting 30 unrelated projects). Instead, **retire `audi` in-place** by adding a deprecation banner to `/home/boris/learning/audi/README.md` and `PLAN.md` pointing readers to jeep `cmd/jeep-audiobook`, committed surgically in the learning repo.
+
+**Executed:** Lane A (external deprecation, human-gated): Added deprecation banners to `audi/README.md` and `audi/PLAN.md` stating the project is archived/deprecated (2026-08-22) and ported to jeep as `jeep-audiobook`, supporting PDF, ePub, Markdown/plain-text, and HTML/web-article inputs. Staged ONLY `audi/README.md` and `audi/PLAN.md` explicitly (not `git add -A`), avoiding the dirty files (`ma/pyproject.toml`, `ma/uv.lock`, `robotics/`, `audi/.claude/plans/*.md`, `ma/Environments.ipynb`). Committed as "audi: mark deprecated — ported to jeep (jeep-audiobook)" (commit `6d6ae58` in `tvaroska/learning`). **Push deferred pending human sign-off** — modifying the shared private monorepo is a high-blast-radius action; the implementer must NOT push autonomously (per plan + DECISIONS.md S1-ab-13 guidance).
+
+Lane B (jeep bookkeeping, always done): Appended this DECISIONS.md entry recording the finding, the rejected whole-repo archive, the chosen resolution (deprecation banner), the surgical-staging gotcha, and the human-gate status. TODO.md flipped to `- [!]` (deprecation prepared locally, awaiting human push).
+
+**Rationale:** The deprecation notice is the faithful, non-destructive realization of the task intent ("mark audi archived; development continues in jeep"). It preserves history, is reversible, and carries zero blast radius for the 30 unrelated projects sharing the monorepo. A deletion (`git rm audi/`) was explicitly out of scope unless the human asks. If the human later wants the whole `learning` repo archived, that is their call to make in the GitHub UI — this task does not execute it.
+
+**Gotchas:**
+- **There is no `tvaroska/audi` repo.** The module path `github.com/tvaroska/learning/audi` is a Go module convention pointing at a subdirectory, NOT a GitHub repo URL. `gh repo view tvaroska/learning/audi` errors (not a valid repo).
+- **`tvaroska/learning` is shared and dirty.** The working tree has unrelated modified/untracked paths (`ma/`, `robotics/`, `audi/.claude/plans/*.md`) that MUST NOT be swept into the commit. Always stage paths explicitly (`git -C /home/boris/learning add audi/README.md audi/PLAN.md`), NEVER `git add -A` / `git add .` there.
+- **Push is human-gated.** Modifying and pushing to the private `tvaroska/learning` monorepo is a high-blast-radius action. The implementer prepared the commit locally and STOPPED; a human must review and approve the push. The task closes when the finding is recorded (Lane B), regardless of whether Lane A's push happens now or later.
+- **This is NOT a jeep CRITICAL path.** The task touches only external (`tvaroska/learning`) and jeep docs (DECISIONS.md, TODO.md); no files under jeep's CRITICAL.md are modified.
+
+---
+
 ## 2026-08-22 — Documentation complete: jeep-audiobook is live, audi archive proposed (S1-ab-13)
 
 **Task:** S1-ab-13 · **Area:** docs/ops (pure documentation + backlog note; NO production code changes)

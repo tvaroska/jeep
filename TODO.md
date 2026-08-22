@@ -21,7 +21,7 @@ pick one up to retry.
 
 ## Sprint 0: Critical Issues (always-active triage lane)
 
-- [ ] S0-infra-1 (P2) Archive the audi GitHub repo (github.com/tvaroska/learning/audi) — port to jeep is complete; repo-admin is manual.
+- [!] S0-infra-1 (P2) Archive the audi GitHub repo (github.com/tvaroska/learning/audi) — port to jeep is complete; repo-admin is manual. — deprecation notice committed in learning repo (commit 6d6ae58), awaiting human push; see DECISIONS.md for the false-premise finding (no standalone audi repo; it's a monorepo subdir).
 
 Add with `/new-task` (categories: sec, bug, infra, perf, debt, rel).
 
