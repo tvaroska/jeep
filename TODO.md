@@ -11,7 +11,7 @@
 > See [DECISIONS.md](DECISIONS.md) for the decision/learning log.
 > See [CRITICAL.md](CRITICAL.md) for protected/sensitive paths (auto-escalate).
 
-<!-- Counters: sec=0 bug=0 infra=0 perf=0 debt=0 rel=0 -->
+<!-- Counters: sec=0 bug=0 infra=1 perf=0 debt=0 rel=0 -->
 
 **Checkbox states:** `- [ ]` open · `- [x]` done · `- [!]` attempted-but-failed
 (awaiting follow-up). `/open` and `/status` surface `- [!]`; `/implement` may
@@ -21,7 +21,9 @@ pick one up to retry.
 
 ## Sprint 0: Critical Issues (always-active triage lane)
 
-No open issues. Add with `/new-task` (categories: sec, bug, infra, perf, debt, rel).
+- [ ] S0-infra-1 (P2) Archive the audi GitHub repo (github.com/tvaroska/learning/audi) — port to jeep is complete; repo-admin is manual.
+
+Add with `/new-task` (categories: sec, bug, infra, perf, debt, rel).
 
 <!-- Example rows:
 - [ ] S0-sec-1 (P0) Rotate leaked API key and add secret scanning
@@ -101,7 +103,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: markdown/plain-text (`#`/`##` headings → section levels; fenced code → code blocks) and HTML/web-articles (readability-style main-content extraction → headings → sections; strip nav/boilerplate).
   - Accept: unit tests convert a markdown fixture and an HTML-article fixture into correct section trees; `go test ./...` green.
 
-- [ ] S1-ab-13 Archive audi; update jeep README/docs
+- [x] S1-ab-13 Archive audi; update jeep README/docs _(done 2026-08-22; see docs/features/ab.md)_
   - Deps: S1-ab-9 (and remaining features as landed).
   - Scope: document `jeep-audiobook` in README + `docs/features/`; note audi is archived (the GitHub archive itself is a manual step — PROPOSE it, don't attempt repo-admin).
   - Accept: README documents the new tool + supported formats; `docs/features/` has the archive entry; a Sprint 0 note proposes archiving the audi repo.

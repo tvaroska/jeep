@@ -1065,3 +1065,83 @@ Unit tests cover the happy path (correct section titles/levels, code blocks, pro
 **Boilerplate strip is load-bearing:** Without skipping `<nav>`/`<header>`/`<footer>`, the `<body>` fallback would ingest entire menus and site chrome. The strip list makes web articles usable.
 
 **Whitespace collapse in HTML:** Text from HTML layout has whitespace collapsed (`strings.Fields`) per the browser rendering model. This is distinct from "no word-level rewriting" — layout whitespace is part of the format, not content.
+
+---
+
+## Documentation Complete: README + Archive + audi Supersession Proposal
+
+**Built:** 2026-08-22 (S1-ab-13)
+
+### What Was Built
+
+Pure documentation update to make `jeep-audiobook` discoverable now that all technical tasks (S1-ab-1 through S1-ab-12) are complete. No production code or CRITICAL paths were touched. This task delivered:
+
+1. **README.md updates** — Added `jeep-audiobook` to the tool table and install block, documented the ffmpeg/ffprobe runtime dependency in Setup, noted that audiobook reuses TEXT/TTS/IMAGE model uses, and added a complete `## jeep-audiobook` section (flags table + examples).
+
+2. **docs/features/ab.md archive entry** — This S1-ab-13 entry documenting the port completion and the audi-supersession proposal.
+
+3. **TODO.md Sprint 0 task** — Added a new `S0-infra-1` task proposing the GitHub archive of the `audi` repo (`github.com/tvaroska/learning/audi`) now that the port to jeep is complete, and bumped the `infra` counter from 0 to 1. The task is a PROPOSAL — the GitHub archive action itself is a manual repo-admin step, not performed by this task.
+
+4. **DECISIONS.md entry** — Recorded the docs-only nature of the task, the flag-parity verification as the anti-drift guard, and the audi-archive proposal (not execution).
+
+### Why This Approach
+
+**README flag docs match `--help` exactly:** The acceptance criteria grep `--help` output for every flag documented in the README. This anti-drift guard ensures the documentation stays truthful as the tool evolves. The flag table lists ONLY the tool-specific flags (voice, style, mode, art, resume, chapters, from-page, to-page, concurrency, output, model, tts-model, image-model); the common flags (project, region, retry, timeout, quiet, dry-run, version, format) are documented once in the shared "Common flags" section.
+
+**Output is a DIRECTORY, not a file:** The table explicitly notes that `-o/--output` specifies a directory (where `chapter_NN.mp3` + `manifest.json` are written), unlike `jeep-image`/`jeep-tts` where `-o` is a single output file. This is the load-bearing gotcha from DECISIONS.md S1-ab-9.
+
+**ffmpeg/ffprobe runtime dependency documented:** `jeep-audiobook` is the only jeep tool that requires these binaries on PATH (for PCM→MP3 encoding, per-segment loudness normalization, concat, and ID3 cover-art mux). The README Setup section now calls this out explicitly.
+
+**Supported formats listed:** PDF, ePub, Markdown (`.md`/`.markdown`/`.txt`/`.text`), HTML (`.html`/`.htm`). The `--from-page`/`--to-page` flags are documented as PDF-only; using them with page-less sources (ePub/Markdown/HTML) errors clearly.
+
+**Model reuse, no new key:** The Model configuration section was updated with a one-liner noting that `jeep-audiobook` reuses existing model uses (TEXT for describe/prepare, TTS for synthesis, IMAGE for `--art` generation) without introducing a new `JEEP_MODEL_*` environment variable. This aligns with the design decision from the plan (S1-ab-13, step 4).
+
+**Runnable examples:** The examples block includes both simple invocations (`jeep-audiobook book.pdf`) and complex ones showing flag combinations (`-v Puck --chapters 1,3-5`, `--art generate`, `--resume`, `--mode summary`). Two in-repo dry-run examples (`internal/mdsource/testdata/article.md`, `internal/htmlsource/testdata/article.html`) are provided as acceptance-check commands that run offline without GCP credentials or network access.
+
+**audi archive is a PROPOSAL, not an action:** The Sprint 0 task explicitly states "repo-admin is manual" so implementers understand this is a planning item, not executable automation. The audi repo (`/home/boris/learning/audi`) is left untouched — no `gh repo` command, no file edits in the audi codebase.
+
+### Verification
+
+**T1 (gates the commit):**
+- `go build ./... && go vet ./... && go test ./...` — all green
+- `git diff --name-only -- internal cmd spec .github .goreleaser.yml CRITICAL.md` — prints nothing (proves no code or CRITICAL path was touched)
+
+**T2 (gates `- [x]`):**
+1. **Flag-parity/no-drift:** `go run ./cmd/jeep-audiobook --help 2>&1` — every flag the README documents (voice, style, mode, art, resume, chapters, from-page, to-page, concurrency, output, model, tts-model, image-model) appears in `--help` and vice-versa, same defaults.
+
+2. **Install path is real:** `go build ./cmd/jeep-audiobook` exits 0, proving the documented `go install github.com/tvaroska/jeep/cmd/jeep-audiobook@latest` path is valid.
+
+3. **Documented example runs offline:** `GOOGLE_CLOUD_PROJECT=test-project go run ./cmd/jeep-audiobook --dry-run internal/mdsource/testdata/article.md` prints planned chapters and exits 0 without contacting Vertex AI, proving the Markdown-format claim and a documented example are accurate.
+
+4. **README grep checks:** All four assertions pass:
+   - `grep -q '## jeep-audiobook' README.md` — section present
+   - `grep -qi 'ffmpeg' README.md` — prereq documented
+   - `grep -qi 'jeep-audiobook@latest' README.md` — install line present
+   - `grep -Eqi 'pdf.*epub.*(markdown|md).*html|epub.*markdown' README.md` — formats listed
+
+5. **Archive entry exists:** `grep -q 'S1-ab-13' docs/features/ab.md` confirms the entry.
+
+6. **Sprint 0 proposal + counter:** `grep 'S0-infra-1' TODO.md` finds the open `- [ ]` task proposing the audi repo be archived, and `grep 'infra=1' TODO.md` confirms the counter was bumped from 0 to 1.
+
+7. **S1-ab-13 flipped to done:** (After the `/implement` archive step) `grep '\- \[x\] S1-ab-13' TODO.md` confirms it was marked done with the standard `_(done 2026-08-22; see docs/features/ab.md)_` suffix.
+
+### Files Touched
+
+- `README.md` — tool table, install block, Setup section (ffmpeg note), Model configuration section (audiobook model-reuse note), new `## jeep-audiobook` section
+- `docs/features/ab.md` — this S1-ab-13 archive entry
+- `TODO.md` — Sprint 0 `S0-infra-1` task, counter bump (`infra=0` → `infra=1`), and at close: S1-ab-13 flipped to `- [x]`
+- `DECISIONS.md` — S1-ab-13 append entry
+
+### Gotchas
+
+**Do NOT touch code or CRITICAL paths:** This is a docs-only task. `internal/`, `cmd/`, `spec/`, `.github/`, `.goreleaser.yml`, and `CRITICAL.md` must remain unchanged. The T1 `git diff` check enforces this.
+
+**Flag docs MUST match `--help` exactly:** The T2 anti-drift check verifies one-for-one parity. If a flag exists in `--help` but is not documented in the README, or vice-versa, the check fails. Defaults must also match.
+
+**audi archive is PROPOSED, not executed:** Do NOT run `gh repo archive`, do NOT edit files in `/home/boris/learning/audi`. The Sprint 0 task is the proposal; a human will execute the GitHub archive action later.
+
+**The `-o` is-a-directory note is load-bearing:** Users coming from `jeep-tts` (where `-o output.wav` is a file) will expect `-o` to be a file. The README must explicitly state "Output DIRECTORY (not a file)" to prevent confusion.
+
+**README structure mirrors existing tools:** The `## jeep-audiobook` section follows the same template as `## jeep-research` (one-line description, synopsis, flags table, examples block). The common flags stay in the shared table; only tool-specific flags are listed in the audiobook section.
+
+**Examples must be runnable:** The dry-run examples (`internal/mdsource/testdata/article.md`, `internal/htmlsource/testdata/article.html`) are real files that exist in the repo and can be executed offline without GCP credentials.

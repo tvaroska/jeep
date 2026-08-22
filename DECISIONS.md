@@ -15,6 +15,25 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Documentation complete: jeep-audiobook is live, audi archive proposed (S1-ab-13)
+
+**Task:** S1-ab-13 · **Area:** docs/ops (pure documentation + backlog note; NO production code changes)
+
+**Decision:** With all twelve technical tasks (S1-ab-1 through S1-ab-12) complete, this final task makes `jeep-audiobook` discoverable and formally proposes archiving the source `audi` repository. Delivered README updates (tool table, install line, ffmpeg prereq, model-reuse note, and a full `## jeep-audiobook` section with flag table + examples), a completed-work archive entry in `docs/features/ab.md`, and a Sprint 0 task proposing the GitHub archive of `github.com/tvaroska/learning/audi` (the actual repo-admin action is manual, not executed here).
+
+**Rationale:** Flag documentation in the README is cross-checked against `--help` output (the T2 acceptance grep) to prevent drift as the tool evolves. The README explicitly notes that `-o/--output` is a DIRECTORY (not a file like `jeep-tts`), that `--from-page`/`--to-page` are PDF-only, and that the tool requires `ffmpeg`/`ffprobe` on PATH. These are the load-bearing gotchas from prior tasks (DECISIONS.md S1-ab-9, S1-ab-8, S1-ab-1). The audi archive is PROPOSED (Sprint 0 task `S0-infra-1`) rather than executed — GitHub repo archival is a manual repo-admin step, not scripted.
+
+**Verified:** T1 ladder (`go build ./... && go vet ./... && go test ./...` all green; `git diff --name-only -- internal cmd spec .github .goreleaser.yml CRITICAL.md` prints nothing, proving no code/CRITICAL change) and T2 acceptance (flag-parity between README and `--help`; `go build ./cmd/jeep-audiobook` succeeds; offline dry-run examples run; README grep checks pass; archive entry exists; Sprint 0 proposal filed with counter bump `infra=0`→`infra=1`; S1-ab-13 flipped to `- [x]` with done-suffix). No new dependencies, no CRITICAL paths touched. The port from audi to jeep as `cmd/jeep-audiobook` is complete.
+
+**Gotchas:**
+- **Flag-parity is the anti-drift guard.** The T2 check greps `--help` for every flag the README documents and vice-versa. If you add/change/remove a flag in `cmd/jeep-audiobook/main.go`, update the README flag table to match — or the next docs verification will fail.
+- **audi archive is PROPOSED, not executed.** Do NOT run `gh repo archive` or edit `/home/boris/learning/audi`. The Sprint 0 task is the proposal; a human performs the GitHub action.
+- **README section mirrors existing tools.** The `## jeep-audiobook` section follows the same template as `## jeep-research` (description, synopsis, supported-formats line, flags table, examples). Common flags (project/region/retry/timeout/quiet/dry-run/version/format) stay in the shared table; only tool-specific flags are listed.
+- **The `-o` is-a-directory note is mandatory.** Users coming from `jeep-tts` (where `-o output.wav` is a file) will expect `-o` to be a file. The README must state "Output DIRECTORY (not a file)" to prevent confusion.
+- **Runnable examples are load-bearing.** The dry-run examples (`internal/mdsource/testdata/article.md`, `internal/htmlsource/testdata/article.html`) are real files that exist in the repo and run offline without GCP credentials — acceptance depends on them.
+
+---
+
 ## 2026-08-22 — Markdown/plain-text + HTML/web-article `Source` adapters (S1-ab-12)
 
 **Task:** S1-ab-12 · **Area:** feature (new packages `internal/mdsource`, `internal/htmlsource`; shared helper in `internal/ingest`)

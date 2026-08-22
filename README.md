@@ -13,6 +13,7 @@ CLI tools for Google Gemini via Vertex AI.
 | `jeep-image` | Image generation |
 | `jeep-tts` | Text-to-speech |
 | `jeep-research` | Deep research reports |
+| `jeep-audiobook` | PDF/ePub/Markdown/HTML → narrated audiobook |
 
 ## Install
 
@@ -21,6 +22,7 @@ go install github.com/tvaroska/jeep/cmd/jeep@latest
 go install github.com/tvaroska/jeep/cmd/jeep-image@latest
 go install github.com/tvaroska/jeep/cmd/jeep-tts@latest
 go install github.com/tvaroska/jeep/cmd/jeep-research@latest
+go install github.com/tvaroska/jeep/cmd/jeep-audiobook@latest
 ```
 
 ## Setup
@@ -29,6 +31,8 @@ Requires a GCP project with the Vertex AI API enabled and valid credentials (e.g
 
 The GCP project is auto-detected from `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, or `gcloud config get-value project` — or pass `--project` explicitly.
 
+`jeep-audiobook` also requires `ffmpeg` and `ffprobe` on PATH for audio processing.
+
 ## Model configuration
 
 Each tool resolves its model in order:
@@ -36,6 +40,8 @@ Each tool resolves its model in order:
 1. `--model` flag
 2. `JEEP_MODEL_<USE>` env var (`JEEP_MODEL_TEXT`, `JEEP_MODEL_IMAGE`, `JEEP_MODEL_TTS`, `JEEP_MODEL_RESEARCH`)
 3. Per-tool default: `gemini-3.5-flash` (text), `gemini-3.1-flash-image` (image), `gemini-3.1-flash-tts-preview` (tts), `deep-research-preview-04-2026` (research)
+
+`jeep-audiobook` reuses the TEXT (for describe/prepare), TTS (for synthesis), and IMAGE (for `--art` generation) model uses — no new model key.
 
 ## Configuration file
 
@@ -241,6 +247,56 @@ echo "analyze recent advances in fusion energy" | jeep-research
 ```
 
 In text mode, sources are appended as a numbered list. In JSON mode, sources are included in the `sources` array.
+
+## jeep-audiobook
+
+Generate a narrated audiobook from PDF, ePub, Markdown, or HTML files using Gemini TTS.
+
+```
+jeep-audiobook [flags] <input-file>
+```
+
+Supported formats: PDF, ePub, Markdown (`.md`/`.markdown`/`.txt`/`.text`), HTML (`.html`/`.htm`).
+
+The output is a DIRECTORY containing `chapter_NN.mp3` files, a `manifest.json`, and optional `chapter_NN.png` cover-art sidecars when `--art` is enabled. The tool requires `ffmpeg` and `ffprobe` on PATH for audio processing and loudness normalization.
+
+### Flags
+
+In addition to the common flags, `jeep-audiobook` accepts:
+
+| Flag | Description |
+|------|-------------|
+| `-v, --voice string` | Voice name (default: `Kore`) |
+| `--style string` | Speaking style instructions (e.g., "Read slowly and warmly") |
+| `--mode string` | Narration mode: `full`, `summary`, or `abstract` (default: `full`) |
+| `--art string` | Chapter cover art: `generate`, `extract`, `book-cover`, or `none` (default: `none`) |
+| `--resume` | Resume from cached work in `<output>/.cache` |
+| `--chapters string` | Comma-separated 1-based chapter indices/ranges, e.g. `1,3-5` |
+| `--from-page int` | Start page (PDF only; 0 = from start) |
+| `--to-page int` | End page (PDF only; 0 = to end) |
+| `--concurrency int` | Concurrent TTS workers (0 = default of 4) |
+| `-o, --output string` | Output DIRECTORY (not a file; default: `audiobook`) |
+| `--model string` | Text model for describe/prepare (default: resolved TEXT model) |
+| `--tts-model string` | TTS model for synthesis (default: resolved TTS model) |
+| `--image-model string` | Image model for `--art generate`/`book-cover` (default: resolved IMAGE model) |
+
+Note: `-o/--output` specifies a DIRECTORY where `chapter_NN.mp3` and `manifest.json` are written, unlike `jeep-image`/`jeep-tts` where `-o` is a single output file.
+
+`--from-page`/`--to-page` work only on PDF inputs. Using them with ePub/Markdown/HTML (page-less formats) returns an error.
+
+### Examples
+
+```sh
+jeep-audiobook book.pdf
+jeep-audiobook -v Puck --chapters 1,3-5 book.epub -o output
+jeep-audiobook --dry-run --from-page 10 --to-page 50 book.pdf
+jeep-audiobook --art generate book.pdf
+jeep-audiobook --resume book.pdf
+jeep-audiobook article.md -o markdown-audiobook
+jeep-audiobook webpage.html -o web-audiobook
+jeep-audiobook --mode summary --chapters 1-3 book.pdf -o summary
+GOOGLE_CLOUD_PROJECT=test-project jeep-audiobook --dry-run internal/mdsource/testdata/article.md
+```
 
 ## Supported file types
 
