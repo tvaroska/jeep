@@ -6,6 +6,59 @@ documents into narrated audiobooks via Gemini TTS.
 
 ---
 
+## Token Usage Tracking + Structured Logging
+
+**Built:** 2026-08-22 (S1-ab-5)
+
+### What Was Built
+
+Ported two stdlib-only infrastructure packages from the audi codebase: `internal/log` (verbatim) and `internal/usage` (simplified to track tokens only). Both packages are nil-safe, concurrency-safe, and designed for use by the audiobook pipeline and all other jeep tools.
+
+### The Log Package
+
+`internal/log` is a verbatim port from audi with a single cosmetic change (dropped the audi-specific task reference from the package doc comment). It wraps `log/slog` with level-based filtering and provides a clean `New(level string, w io.Writer) *slog.Logger` constructor. The package is pure stdlib (`io`, `log/slog`, `os`, `strings`) with no external dependencies.
+
+### The Usage Package
+
+`internal/usage` tracks Gemini API token consumption across a run. Unlike the audi original, it uses a **single currency model** — tokens only — eliminating the old pricing estimates, TTS character counts, and cost calculations that were flagged as stale and unreliable in the source code.
+
+**Core API:**
+- `Tracker` — holds per-model token counters, mutex-guarded for concurrent writes
+- `Record(model string, prompt, output, total int64)` — accumulates one API call's token usage (renamed from audi's `RecordLLM` since there's only one currency now)
+- `Report()` — snapshots aggregate totals: `PromptTokens`, `OutputTokens`, `TotalTokens`, `Calls`
+- `Log(logger *slog.Logger)` — emits a structured log line with the current report
+
+All methods are **nil-safe**: a nil `*Tracker` no-ops on `Record`/`Log` and returns a zero `Report`. This allows callers to pass a possibly-nil tracker (recording disabled) without branching.
+
+### Why This Approach
+
+**Stdlib-only:** Both packages have zero external dependencies. This keeps them off the `CRITICAL.md` escalation list and makes them trivially unit-testable without GCP credentials or network access. Token metadata originates from `genai.GenerateContentResponse.UsageMetadata`, but `internal/usage` does not import the genai SDK — callers read the metadata and pass the values to `Record`.
+
+**One currency:** The decision to consolidate TTS onto Gemini's `GenerateSpeech` API (DECISIONS.md 2026-08-22) means everything flows through genai, which returns token counts for both text generation and TTS. The old Cloud TTS character-based tracking and stale dollar estimates are no longer relevant. Dropping them simplifies the API and removes misleading cost figures.
+
+**Concurrency-safe by design:** The audiobook pipeline (S1-ab-8) writes usage from a worker pool. The mutex-guarded `Tracker` and nil-safe contract eliminate the need for callers to manage locks or nil checks.
+
+### Verification
+
+Unit tests demonstrate that `Record` accumulates tokens correctly across multiple calls (same model and across different models), that the nil-receiver no-ops return a zero `Report` without panicking, and that concurrent writes from multiple goroutines complete without data races (`go test -race` passes). The log package tests verify level-based filtering (a Warn-level logger suppresses Info messages) and case-insensitive level parsing.
+
+### Files Touched
+
+- `internal/usage/usage.go` — `Tracker`, `Record`, `Report`, `Log`
+- `internal/usage/usage_test.go` — table-driven accumulation tests, nil-safety, concurrency
+- `internal/log/log.go` — `New`, `parseLevel`, level filtering
+- `internal/log/log_test.go` — level gating tests
+
+### Gotchas
+
+**Do NOT import genai into `internal/usage`:** The package is intentionally stdlib-only. Callers convert `UsageMetadata` fields (int32 → int64) at the call site. Adding the genai dependency would drag this leaf package onto the `internal/gemini` blast radius.
+
+**Nil receiver is a contract, not an optimization:** Later adapters may hold a nil `*Tracker` to disable recording. All methods must handle nil gracefully without panicking.
+
+**Lock on reads, not just writes:** Both `Report` and `Log` acquire the mutex. Reading the per-model map while a concurrent goroutine is writing races without the lock. The `-race` detector will catch a missing lock.
+
+---
+
 ## Reusable Gemini Client + TTS Enhancements
 
 **Built:** 2026-08-22 (S1-ab-1)
