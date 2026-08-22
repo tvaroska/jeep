@@ -114,3 +114,113 @@ that lack multimedia tools. In the production environment, both tools are presen
 **jeep-tts still writes WAV:** The tool's existing `pcmToWAV` function and its test
 (`pcm_test.go`) remain unchanged. Only the audiobook pipeline will consume MP3-encoded
 output; jeep-tts continues to produce WAV files for single-prompt use cases.
+
+---
+
+## Format-Agnostic Ingestion Seam
+
+**Built:** 2026-08-22 (S1-ab-2)
+
+### What Was Built
+
+Introduced the `internal/ingest` package with a tree-based document model that replaces
+audi's page-centric TOC approach. The package defines the core types (`Block`, `Section`,
+`Document`, `Meta`) and the `Source` interface that format adapters (PDF, ePub, markdown,
+HTML) will implement to feed the audiobook pipeline.
+
+The section-based chapterization algorithm (`Structure`) walks the document tree and groups
+sections into narration chapters, applying the same 30-45 minute granularity strategy as
+audi but adapted to work on a section tree instead of page ranges.
+
+### Core Model
+
+**`Source → Document{Sections}`:** Format adapters implement the `Source.Load(path string)
+(*Document, error)` interface. A `Document` holds metadata (`Meta`) and a tree of `Section`
+nodes in `Sections` (the top-level roots). Each `Section` has:
+- A `Title` and hierarchy `Level` (1-based)
+- Ordered content `Blocks` (prose/figure/caption/code/table in reading order)
+- Ordered child `Sections` (`Children`)
+
+The tree represents the document's logical structure without any format-specific details.
+There are no page numbers, byte offsets, or file-format metadata in the model — those
+concerns live in the adapters.
+
+**`Block` types:** Content is classified as `BlockProse` (text), `BlockFigure` (raster
+image with `Data`/`MimeType`), `BlockCaption`, `BlockCode`, or `BlockTable`. This lets
+the pipeline make intelligent decisions about what to narrate, what to describe, and what
+to skip. The optional `Page` field (1-based) is for source traceability when the adapter
+can supply it; it's not used by chapterization.
+
+### Tree-Based Chapterization
+
+**Key semantic shift from audi:** Chapters are derived by walking the `Section` tree, not
+by slicing page ranges. The `Structure(*Document) []Chapter` function:
+
+1. **Iterates top-level sections** (`doc.Sections`) directly — no `minLevel` scanning needed.
+2. **Expands sections with ≥2 children** into one chapter per child for finer granularity
+   (commute-sized chunks). The parent section's own intro `Blocks` (prose that precedes
+   its subsections) are absorbed by the first child via a synthetic **intro-shim** `*Section`
+   prepended to the child's chapter.
+3. **Keeps sections with <2 children whole** as a single chapter.
+4. **Filters boilerplate** at the top level (Cover/Copyright/Table of Contents/Index/Colophon)
+   using the same case-insensitive prefix-matching logic as audi. Foreword, Preface, and
+   Introduction are treated as real content and are never skipped.
+
+The intro-shim approach ensures no content is lost during expansion: a parent section's
+intro prose appears exactly once, ahead of the first expanded child chapter, without
+double-counting. The shim is a `&Section{Title: "", Level: parent.Level, Blocks: parent.Blocks}`
+that carries only the parent's own blocks, never its children.
+
+### Why This Approach
+
+**Tree vs. pages:** The page-centric model couples chapterization to the PDF format
+(page ranges, `StartPage`/`EndPage`, same-page deduplication). Moving to a section tree
+decouples structure from pagination, making the pipeline format-agnostic. An ePub or
+markdown document has no pages, but it does have sections. The tree model works uniformly
+across all formats.
+
+**Intro-shim uniformity:** The alternative to the shim would be giving `Chapter` two
+different representations: a simple `[]*Section` for unexpanded chapters and a complex
+`ParentIntro + []*Section` for expanded ones. The shim keeps `Chapter.Sections` always
+`[]*Section`, simplifying downstream code that flattens chapters into TTS segments.
+
+**Boilerplate filtering:** Front and back matter like copyright pages and indexes produce
+useless audio. The same heuristic list from audi (`defaultSkipTitles`) is ported verbatim,
+including the `honeycomb` entry (a book-specific artifact from the test corpus, harmless).
+
+**Heading detection deferred:** The old `chaptersFromHeadings` text-based heuristic (regex
+matching chapter/part/section patterns) is not ported. For headless formats like plain
+markdown or HTML articles, the responsibility for detecting structure and building the
+tree lies with the adapter (S1-ab-12), not with chapterization. The `Structure` function
+only consumes an already-built tree.
+
+**No external dependencies:** The package imports only stdlib (`strings` for boilerplate
+matching, `reflect`/`testing` for tests). No genai, no pdfcpu, no ledongthuc. This keeps
+it off the `CRITICAL.md` escalation list and makes it trivially unit-testable without
+network or GCP setup.
+
+### Files Created
+
+- `internal/ingest/document.go` — core types, package documentation
+- `internal/ingest/structure.go` — `Chapter`, `Structure`, boilerplate classifier
+- `internal/ingest/structure_test.go` — table-driven tests over synthetic section trees
+  (expansion, intro absorption, boilerplate filtering, edge cases)
+
+### Gotchas
+
+**No page-model artifacts:** Do not reintroduce `minLevel`, page clamping, same-page
+deduplication, or `numPages` from audi. These are meaningless in the tree model. If you
+find yourself needing them, the abstraction is wrong.
+
+**Intro-shim carries blocks only:** The shim must include the parent's `Blocks` but never
+its `Children`. Copying children would double-count them when the pipeline later flattens
+`chapter.Sections`.
+
+**`Source.Load` is context-free:** The signature is `Load(path string) (*Document, error)`
+with no `context.Context` parameter. This matches audi's `Extract(path)` idiom and reflects
+that ingestion is synchronous local I/O. If a reviewer later prefers context support, it's
+a trivial signature bump — but the default matches the surrounding codebase conventions.
+
+**Boilerplate at top level only:** Only `doc.Sections` (the roots) are checked against
+`defaultSkipTitles`. Children of a boilerplate section are not individually filtered. This
+matches audi's behavior.
