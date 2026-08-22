@@ -15,6 +15,55 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Token-only usage tracking + structured logging (S1-ab-5)
+
+**Task:** S1-ab-5 · **Area:** infra (new packages `internal/usage`, `internal/log`)
+
+**Decision:** Ported audi's `internal/log` verbatim and `internal/usage` with a
+simplification to one currency (tokens only). Both packages are stdlib-only
+(`log/slog`, `sync`), nil-safe, and concurrency-safe.
+
+Key design choices:
+1. **`log` is a verbatim port** from audi: pure stdlib (`io`, `log/slog`, `os`,
+   `strings`), no API changes. The only edit: dropped the audi-specific `(S3-5)`
+   task reference from the package doc comment.
+2. **`usage` tracks tokens only** (one currency). Dropped from audi: `Pricing`,
+   `DefaultPricing`, `RecordTTS`, `ttsCounters`, `TTSChars`, `TTSCalls`,
+   `EstimatedCostUSD`, and all cost math. The token metadata comes from
+   `genai.GenerateContentResponse.UsageMetadata` (read by callers in later tasks;
+   this package does NOT import genai).
+3. **Renamed `RecordLLM`→`Record`** (single currency means no "LLM" qualifier
+   needed) and `llmCounters`→`counters`.
+4. **Simplified `Report`** to hold only `PromptTokens`, `OutputTokens`,
+   `TotalTokens`, `Calls` (aggregated across all models).
+5. **Simplified `Log`** to take only a logger (no pricing parameter); emits
+   "run token usage" with four keys (`prompt_tokens`, `output_tokens`,
+   `total_tokens`, `calls`).
+6. **Preserved the nil-safe + mutex-guarded contract** — all methods no-op on a
+   nil `*Tracker` (so later adapters can call unconditionally), and lock `mu` on
+   every mutation/read (load-bearing for the S1-ab-8 concurrent pipeline).
+
+**Verified:** Tests pass showing two `Record` calls (same model + across two models)
+sum into `Report{PromptTokens, OutputTokens, TotalTokens}` and increment `Calls` per
+call; nil `*Tracker` no-ops and returns zero `Report`; `Log` does not panic on nil
+receiver or nil logger; `go test -race -run TestTracker_Concurrent ./internal/usage/`
+exits 0 with no DATA RACE; log tests show Warn-level logger suppresses Info, Debug
+logger emits all levels, `parseLevel` is case-insensitive+trimmed. `go build ./... &&
+go vet ./... && go test ./...` all green. Smoke test (New→Record x2→Report totals
+300/100/400/2→Log emits "run token usage" line) passes. The usage package imports only
+`log/slog` and `sync` (no `google.golang.org/genai`); no Pricing/DefaultPricing/
+RecordTTS/EstimatedCostUSD symbols exist.
+
+**Gotchas:**
+- **Stdlib-only is load-bearing** — do NOT import `google.golang.org/genai` into
+  `internal/usage`. Callers convert `UsageMetadata` fields at the call site.
+- **Nil receiver no-op is a contract** — later adapters may hold a possibly-nil
+  `*Tracker` ("recording disabled") and call it unconditionally.
+- **Lock on `Report`/`Log` too**, not just `Record` — reads race with concurrent
+  writes otherwise; `-race` will catch a missing lock.
+
+---
+
 ## 2026-08-22 — ePub `Source` adapter on the pure-Go stack (S1-ab-4)
 
 **Task:** S1-ab-4 · **Area:** infra (new package `internal/epubsource`; `go.mod`/`go.sum`)

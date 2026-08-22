@@ -61,7 +61,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: unzip → parse OPF spine + `nav`/NCX TOC → XHTML per chapter → `Section` tree; extract embedded images as figure blocks.
   - Accept: a unit test parses a small fixture `.epub` into a section tree with correct titles, per-section content, and at least one extracted image; `go test ./...` green.
 
-- [ ] S1-ab-5 Port `usage` (genai token metadata) + `log`
+- [x] S1-ab-5 Port `usage` (genai token metadata) + `log` _(done 2026-08-22; see docs/features/*)_
   - Deps: none.
   - Scope: move audi `internal/usage` + `internal/log`; usage is token-based (one currency) off genai metadata.
   - Accept: unit test shows the tracker accumulates prompt/output/total tokens across calls; `go build ./... && go test ./...` green.
