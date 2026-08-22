@@ -83,8 +83,8 @@ func TestResolveModelWithConfig(t *testing.T) {
 func TestResolveModelWithConfig_NilConfig(t *testing.T) {
 	t.Setenv("JEEP_MODEL_TEXT", "")
 	got := ResolveModelWithConfig(nil, "TEXT")
-	if got != "gemini-3.5-flash" {
-		t.Errorf("ResolveModelWithConfig(nil, TEXT) = %q, want gemini-3.5-flash", got)
+	if got != "gemini-3.7-flash" {
+		t.Errorf("ResolveModelWithConfig(nil, TEXT) = %q, want gemini-3.7-flash", got)
 	}
 }
 

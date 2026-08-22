@@ -6,7 +6,7 @@ import (
 )
 
 var defaults = map[string]string{
-	"TEXT":     "gemini-3.5-flash",
+	"TEXT":     "gemini-3.7-flash",
 	"IMAGE":    "gemini-3.1-flash-image",
 	"TTS":      "gemini-3.1-flash-tts-preview",
 	"RESEARCH": "deep-research-preview-04-2026",

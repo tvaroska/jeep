@@ -14,7 +14,7 @@ func TestResolveModel_Defaults(t *testing.T) {
 		use  string
 		want string
 	}{
-		{"TEXT", "gemini-3.5-flash"},
+		{"TEXT", "gemini-3.7-flash"},
 		{"IMAGE", "gemini-3.1-flash-image"},
 		{"TTS", "gemini-3.1-flash-tts-preview"},
 	}
