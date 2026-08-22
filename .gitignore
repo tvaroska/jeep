@@ -9,3 +9,6 @@
 *.png
 coverage.out
 dist/
+
+# Local agent state (gen-3 workflow) — plans are local-only
+.claude/
