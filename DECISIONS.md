@@ -15,6 +15,35 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Generic map-reduce helper on `gemini.Generate` (S1-ab-7)
+
+**Task:** S1-ab-7 · **Area:** infra (new package `internal/mapreduce`)
+
+**Decision:** Implemented a generic, provider-agnostic chunk→map→reduce[+refine] orchestrator in `internal/mapreduce` that routes workflows through `gemini.Generate` with structured JSON schemas. The package is the concurrency primitive for the audiobook pipeline's `--mode summary|abstract` feature (S1-ab-10), which processes over-window inputs by chunking, parallel mapping, and reducing.
+
+Key design choices:
+1. **Two-file split:** `mapreduce.go` (generic orchestrator, no GCP/genai deps) + `gemini.go` (thin Gemini binding).
+2. **Generics `[E, P, R any]`** (Element → Partial → Result) for reusability across any chunk→map→reduce workflow.
+3. **Concurrency via `golang.org/x/sync/errgroup`:** Bounded worker pool + fail-fast semantics. First Map error cancels remaining work and propagates; Reduce/Refine never run on partial failure. `SetLimit(concurrency)` where concurrency defaults to 4 when `≤0` (never pass 0/negative — blocks forever).
+4. **Order preservation:** Map results written to `partials[i]` by index, never appended from goroutines, so Reduce receives partials in element order.
+5. **Empty Elements edge case:** When `Elements` is empty/nil, still calls `Reduce(ctx, nil)` so callers get a defined result (e.g., "No content to summarize") instead of a zero value.
+6. **Local `generator` interface** (following S1-ab-6 precedent): package-local interface matching `gemini.Client.Generate`; `*gemini.Client` satisfies it structurally; tests inject a `fakeGenerator`. This is why the task does NOT touch CRITICAL `internal/gemini` — the seam is the same "fake client returns canned responses" pattern as describe.
+7. **`Step[T]` is minimal:** Calls `gemini.Generate` with schema, unmarshals JSON into `T`. Does NOT record usage (deferred to S1-ab-10 to avoid gold-plating). Retries driven by `GenerateOptions.Retries`; this function adds none.
+
+**Spec/plan discrepancy resolved:** The task scope said "refit `jeep-research`'s hand-rolled synthesis onto the helper." Investigation revealed the current `jeep-research` performs NO local synthesis — it delegates to the Vertex AI interactions deep-research agent (`internal/interactions`), which synthesizes server-side. There is no hand-rolled map-reduce to unify. The task left `cmd/jeep-research` and `internal/interactions` completely untouched (acceptance: still builds + tests green, which holds trivially). The helper's real consumer is S1-ab-10 (`--mode summary|abstract`), which is where "one implementation" is realized.
+
+**Verified:** Tests (chunk→map→reduce producing expected reduced result over a fake, order preservation, fail-fast Map error, empty-Elements calls Reduce with nil, Refine application, context cancellation, missing Map/Reduce errors, Step unmarshals JSON / forwards errors / rejects bad JSON) all PASS; `go build ./... && go vet ./... && go test ./...` all green; `go test -race ./internal/mapreduce/` exits 0 (no DATA RACE); `CGO_ENABLED=0 go build ./...` exits 0 (pure-Go); `go mod tidy` introduces NO new dependency (`golang.org/x/sync` and `google.golang.org/genai` already direct).
+
+**Gotchas:**
+- **Do NOT touch `internal/gemini`** — the local `generator` interface is mandatory. If you think you must change `internal/gemini`, STOP: that auto-escalates (stronger model + review).
+- **JSON schema required** — test fakes MUST return valid JSON matching the target struct (e.g., `{"summary":"text"}`, NOT just `"text"`), or `json.Unmarshal` fails (same bite as S1-ab-6).
+- **`SetLimit(n)` with n<1 blocks forever** — default concurrency to 4 when `spec.Concurrency ≤ 0`.
+- **Reduce/Refine run on outer `ctx`**, not the errgroup's `gctx` (cancelled after Wait).
+- **Order preservation via indexed writes** — `partials := make([]P, len(spec.Elements))`; each goroutine writes `partials[i] = p`, never appends.
+- **No usage tracking in this task** — defer to S1-ab-10 to avoid gold-plating. If Step later needs to expose tokens, return `*gemini.GenerateResult` alongside `T` or accept a `*usage.Tracker` param.
+
+---
+
 ## 2026-08-22 — Port `describe` onto `gemini.Generate` + structured JSON (S1-ab-6)
 
 **Task:** S1-ab-6 · **Area:** infra (new package `internal/describe`)

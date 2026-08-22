@@ -519,3 +519,102 @@ g.Usage.Record(g.Model, int64(res.PromptTokens), int64(res.OutputTokens), int64(
 **Artifact-repair guidance is in the prompt:** It's a string constant, not a runtime flag. Tests assert its presence. Do not dilute or remove this guidance — the phase-0 spike validated it as the solution to PDF text quality issues.
 
 **ImageRef stays primitives-only:** The `ImageRef` struct (used by Weaver) imports no other jeep packages. The S1-ab-8 pipeline maps `ingest.Block(Figure)` → `ImageRef` at the call site; describe must not depend on `ingest`.
+
+---
+
+## Generic Map-Reduce Helper on gemini.Generate
+
+**Built:** 2026-08-22 (S1-ab-7)
+
+### What Was Built
+
+Built a generic, provider-agnostic map-reduce orchestrator in `internal/mapreduce` that routes chunk→map→reduce[+refine] workflows through `gemini.Generate` with structured JSON schemas. The package provides the core concurrency primitive for the audiobook pipeline's `--mode summary|abstract` feature (S1-ab-10), which needs to process over-window inputs by chunking, parallel mapping, and reducing.
+
+The implementation has two files:
+1. **`mapreduce.go`:** The generic orchestrator (`Spec[E,P,R]`, `Run`) with no GCP or genai dependencies
+2. **`gemini.go`:** The thin Gemini binding (`Step[T]`) that wraps `gemini.Generate` + structured JSON unmarshaling
+
+### Core API
+
+**`Spec[E any, P any, R any]`** describes one map-reduce run:
+- `Elements []E` — input chunks
+- `Map func(ctx, i int, e E) (P, error)` — required; transforms one chunk into a partial result
+- `Reduce func(ctx, partials []P) (R, error)` — required; combines all partials into final result
+- `Refine func(ctx, r R) (R, error)` — optional; post-processes the reduced result (e.g., polish/trim)
+- `Concurrency int` — worker pool size (defaults to 4 when ≤0)
+
+**`Run[E,P,R](ctx, spec) (R, error)`** orchestrates the workflow:
+- Maps every element concurrently through a bounded, fail-fast worker pool (`golang.org/x/sync/errgroup`)
+- Collects partials in input order (writes to `partials[i]`, never appends from goroutines)
+- Reduces them into a single result
+- Refines if `Refine != nil`
+- First Map error cancels remaining work and is returned (fail-fast); Reduce/Refine never run on partial failure
+- Empty `Elements` still calls `Reduce(ctx, nil)` so callers get a defined result (e.g., empty-summary string) instead of a zero value
+
+**`Step[T any](ctx, generator, model, system, userText, schema, opts) (T, error)`** is the Gemini building block for Map/Reduce closures:
+- Calls `gemini.Generate` with the system/user prompt and a `*genai.Schema`
+- Unmarshals the returned JSON into `T`
+- Retries are driven by `opts.Retries` (gemini layer); this function adds none
+- Does NOT record usage (deferred to S1-ab-10 to avoid gold-plating)
+
+### The Generator Seam
+
+Following the S1-ab-6 `describe` precedent exactly, `gemini.go` defines a package-LOCAL `generator` interface matching `gemini.Client.Generate`'s signature. `*gemini.Client` satisfies it structurally; tests inject a `fakeGenerator`. This is why the task does NOT actually touch the CRITICAL `internal/gemini` path — the seam is the same "fake client returns canned responses" pattern documented in `design/seams.md`.
+
+### Design Decisions
+
+**New package `internal/mapreduce` (not modify `internal/gemini`):** The task scope explicitly forbids touching `internal/gemini` (SENSITIVE/CRITICAL). All code lives in a new, standalone package. Only the thin `gemini.go` binding imports `internal/gemini` to call its `Generate` method; the core orchestrator (`mapreduce.go`) has zero genai or GCP dependencies.
+
+**Generics `[E, P, R any]`:** Element type, Partial type, Result type are all generic. This makes the helper reusable for any chunk→map→reduce workflow, not just text summarization. The audiobook pipeline will use `E=string` (text chunk), `P=struct{Summary string}`, `R=struct{Summary string}` for summary mode.
+
+**Concurrency via errgroup:** `golang.org/x/sync/errgroup.WithContext` provides bounded worker pool + fail-fast semantics. `SetLimit(concurrency)` bounds parallelism; any Map error cancels the group context and propagates immediately. Retry logic is NOT duplicated here — it lives in `gemini.Generate` via `GenerateOptions.Retries`.
+
+**Order preservation:** Map results are written to `partials[i]` by index, not appended. This guarantees the Reduce function receives partials in the same order as `Elements`, even when goroutines complete out of order.
+
+**Empty Elements edge case:** When `Elements` is empty or nil, `Run` still calls `Reduce(ctx, nil)` so the caller gets a meaningful result (e.g., "No content to summarize") instead of a zero value. This matches the "defined result for all inputs" principle.
+
+**No usage tracking in Step:** The function signature is deliberately minimal — it does NOT accept a `*usage.Tracker` or return `*gemini.GenerateResult`. S1-ab-10 will decide usage wiring (likely the same pattern as `describe`: the caller holds a tracker and records after each `Step` call). Adding it here would be gold-plating.
+
+### Spec/Plan Discrepancy — jeep-research Unchanged
+
+The Sprint 1 plan and the task scope said "refit `jeep-research`'s hand-rolled synthesis onto the helper." Investigation revealed this assumption is stale: the current `jeep-research` performs NO local synthesis — it delegates to the Vertex AI interactions deep-research agent (`internal/interactions`), which synthesizes server-side. There is no hand-rolled map-reduce to unify.
+
+The task left `cmd/jeep-research` and `internal/interactions` completely untouched. The acceptance criterion for them ("still builds + tests green") holds trivially. The helper's real consumer is S1-ab-10 (`--mode summary|abstract`), which is where "one implementation" is realized. This discrepancy is noted in DECISIONS.md.
+
+### Verification
+
+- `TestRun_ChunkMapReduce_ProducesExpectedResult`: `Elements=[1,2,3]`, Map returns `e*10`, Reduce sums → asserts 60 (the core acceptance)
+- `TestRun_PreservesInputOrder`: Map completion order randomized → Reduce receives partials in element order
+- `TestRun_MapError_FailFast`: one Map errors → Run returns that error, Reduce never called (atomic flag assertion)
+- `TestRun_EmptyElements_CallsReduceWithNil`: `Elements=nil` → Reduce receives `len(partials)==0`, returns sentinel
+- `TestRun_Refine_Applied`: Refine transforms result; nil Refine leaves it unchanged
+- `TestRun_ContextCancelled`: pre-cancelled ctx → returns `context.Canceled`
+- `TestRun_MissingMapOrReduce_Errors`: nil Map or nil Reduce → error
+- `TestStep_UnmarshalsJSON`: fakeGenerator returns `{"summary":"hello"}` → Step extracts "hello"
+- `TestStep_ForwardsError`: fake errors → Step propagates
+- `TestStep_BadJSON_Errors`: fake returns non-JSON → parse error
+- Full suite: `go build ./... && go vet ./... && go test ./...` all green
+- Race-free: `go test -race ./internal/mapreduce/` exits 0
+- Pure-Go: `CGO_ENABLED=0 go build ./...` exits 0
+- `go mod tidy` introduces NO new dependency (`golang.org/x/sync` and `google.golang.org/genai` already direct)
+
+### Files Created
+
+- `internal/mapreduce/mapreduce.go` — `Spec[E,P,R]`, `Run`, generic orchestrator
+- `internal/mapreduce/gemini.go` — local `generator` interface, `Step[T]`
+- `internal/mapreduce/mapreduce_test.go` — core orchestrator tests
+- `internal/mapreduce/gemini_test.go` — `fakeGenerator`, Step tests, composition test
+
+### Gotchas
+
+**Do NOT touch `internal/gemini`:** The local `generator` interface is mandatory. If you think you must change `internal/gemini`, STOP — that auto-escalates (stronger model + review). Flag it, don't proceed.
+
+**JSON schema required for Step:** Test fakes MUST return valid JSON matching the target struct (e.g., `{"summary":"text"}`, NOT just `"text"`), or `json.Unmarshal` fails. Same bite as S1-ab-6.
+
+**SetLimit(n) with n<1 blocks forever:** Default concurrency to 4 when `spec.Concurrency ≤ 0`. Never pass 0 or negative to `errgroup.SetLimit`.
+
+**Reduce/Refine run on outer ctx, not gctx:** After `g.Wait()`, use the original `ctx` for Reduce/Refine calls, not the errgroup's cancelled `gctx`.
+
+**Order preservation:** Write map results to `partials[i]`, never append from goroutines. The slice is pre-allocated with `len(spec.Elements)`; each goroutine owns its index.
+
+**No usage tracking yet:** Defer to S1-ab-10 to avoid gold-plating. If Step later needs to expose tokens, return `*gemini.GenerateResult` alongside `T` or accept a `*usage.Tracker` param.
