@@ -3,6 +3,7 @@
 /jeep-image
 /jeep-tts
 /jeep-research
+/jeep-audiobook
 
 # Generated output artifacts
 *.wav

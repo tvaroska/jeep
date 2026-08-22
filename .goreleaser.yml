@@ -31,6 +31,13 @@ builds:
     goarch: [amd64, arm64]
     ldflags: *ldflags
 
+  - id: jeep-audiobook
+    main: ./cmd/jeep-audiobook
+    binary: jeep-audiobook
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags: *ldflags
+
 archives:
   - format: tar.gz
     format_overrides:
