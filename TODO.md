@@ -56,7 +56,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: implement the `Source` seam for PDF — `pdfcpu api.Bookmarks()` → sections, `pdfcpu api.ExtractImages()` → figure blocks with page association, `ledongthuc GetPlainText` → prose. CGO-free (`CGO_ENABLED=0` must build). No MuPDF, no unidoc.
   - Accept: a test/example over `/home/boris/learning/audi/testdata/observability-engineering.pdf` yields 559 outline entries at 4 levels, extracts images with a page number, and returns non-empty prose per section; `CGO_ENABLED=0 go build ./...` succeeds.
 
-- [ ] S1-ab-4 ePub `Source` (pure-Go: OPF spine + nav/NCX → sections + images)
+- [x] S1-ab-4 ePub `Source` (pure-Go: OPF spine + nav/NCX → sections + images) _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-2.
   - Scope: unzip → parse OPF spine + `nav`/NCX TOC → XHTML per chapter → `Section` tree; extract embedded images as figure blocks.
   - Accept: a unit test parses a small fixture `.epub` into a section tree with correct titles, per-section content, and at least one extracted image; `go test ./...` green.
