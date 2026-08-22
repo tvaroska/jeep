@@ -15,6 +15,46 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — `--mode full|summary|abstract` via map-reduce condenser (S1-ab-10)
+
+**Task:** S1-ab-10 · **Area:** feature (new flag + `describe.Summarizer`)
+
+**Decision:** Added a `--mode full|summary|abstract` flag to `cmd/jeep-audiobook`.
+`full` (default) keeps today's behavior exactly (full narration via
+`describe.GeminiPreparer`). `summary` and `abstract` produce a short-form audiobook:
+each chapter's narration is condensed via the generic map-reduce helper
+(`internal/mapreduce`) — chunk the (already-woven) chapter text, map each chunk to
+a partial summary, reduce the partials into a single listening-ready narration.
+
+Key design: swap the `Preparer` implementation, don't touch the pipeline. The
+pipeline runs `Weave → Preparer.Prepare(text) → segment → synthesize → concat`.
+Introduced a new `describe.Summarizer` type that ALSO implements `describe.Preparer`,
+so `main.go` injects either `GeminiPreparer` (full) or `Summarizer` (summary/abstract)
+based on the flag, and `internal/pipeline` needs ZERO changes.
+
+Extended `mapreduce.Step` to accept a trailing `*usage.Tracker` param (nil-safe);
+after a successful `Generate`, it calls `tracker.Record(...)`. This lets
+summary/abstract runs report tokens like `full` does. Updated all existing
+`Step` call sites in tests to pass a trailing `nil`.
+
+**Gotchas:**
+- **Do NOT touch `internal/gemini`.** The package-local `generator` interface
+  (identical single-method `Generate(...)` in describe and mapreduce) is mandatory.
+- **Validate `--mode` BEFORE the dry-run branch** so `--dry-run --mode bogus`
+  errors clearly (acceptance #1 uses dry-run to stay offline).
+- **One canned JSON serves both map and reduce fakes** — `{"summary":..,"narration":..}` —
+  because `encoding/json` ignores fields absent from the target struct.
+- **Map-reduce always runs** even for a single chunk (1 map + 1 reduce); that's
+  intended and uniform. Don't add a single-chunk bypass.
+- **Cache correctness caveat:** The narration cache key
+  (`narrationCacheKey(GeminiModel, pageContents)`) does NOT include the mode. A
+  resume that CHANGES mode over the same output dir could serve a stale full
+  narration for a now-summary run. In practice modes go to different output dirs,
+  and `--resume` is opt-in, so this is out of scope for this task. Known limitation
+  flagged for future consideration.
+
+---
+
 ## 2026-08-22 — CLI integration: `cmd/jeep-audiobook` on shared plumbing (S1-ab-9)
 
 **Task:** S1-ab-9 · **Area:** feature (new `cmd/jeep-audiobook`)

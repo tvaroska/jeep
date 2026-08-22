@@ -32,7 +32,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	var voice, style, output, model, ttsModel, chaptersSpec string
+	var voice, style, output, model, ttsModel, chaptersSpec, mode string
 	var resume bool
 	var fromPage, toPage, concurrency int
 	var common cli.CommonFlags
@@ -41,6 +41,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	common.Register(fs, 30*time.Minute)
 	fs.StringVarP(&voice, "voice", "v", "Kore", "Voice name")
 	fs.StringVar(&style, "style", "", "Speaking style")
+	fs.StringVar(&mode, "mode", "full", "Narration mode: full, summary, or abstract")
 	fs.BoolVar(&resume, "resume", false, "Resume from cached work")
 	fs.StringVar(&chaptersSpec, "chapters", "", "Comma-separated chapter indices/ranges (1-based), e.g. 1,3-5")
 	fs.IntVar(&fromPage, "from-page", 0, "Start page (PDF only, 0 = from start)")
@@ -59,6 +60,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cli.Exitf(cli.ExitUsage, "expected exactly one input file; got %d", fs.NArg())
 	}
 	input := fs.Arg(0)
+
+	// Validate mode early (so dry-run also rejects bad modes).
+	parsedMode, err := describe.ParseMode(mode)
+	if err != nil {
+		return cli.Exitf(cli.ExitUsage, "invalid --mode: %w", err)
+	}
 
 	cfg, err := cli.ResolveCommon(fs, &common.Project, &common.Region, &common.Quiet)
 	if err != nil {
@@ -122,7 +129,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	// Dry-run: print planned chapters without building client.
 	if common.DryRun {
-		return printDryRun(stdout, common.Format, input, output, textModel, resolvedTTSModel, selectedChapters)
+		return printDryRun(stdout, common.Format, input, output, textModel, resolvedTTSModel, mode, selectedChapters)
 	}
 
 	// Real run: build client and execute pipeline.
@@ -146,11 +153,25 @@ func run(args []string, stdout, stderr io.Writer) error {
 		Describer:   describer,
 		Concurrency: concurrency,
 	}
-	preparer := &describe.GeminiPreparer{
-		Client:      client,
-		Model:       textModel,
-		Concurrency: concurrency,
-		Usage:       tracker,
+
+	// Select preparer based on mode.
+	var preparer describe.Preparer
+	if parsedMode == describe.ModeFull {
+		preparer = &describe.GeminiPreparer{
+			Client:      client,
+			Model:       textModel,
+			Concurrency: concurrency,
+			Usage:       tracker,
+		}
+	} else {
+		preparer = &describe.Summarizer{
+			Client:      client,
+			Model:       textModel,
+			Mode:        parsedMode,
+			Concurrency: concurrency,
+			Usage:       tracker,
+			Log:         logger,
+		}
 	}
 	synthesizer := &audio.GeminiSynthesizer{
 		Client: client,
@@ -395,7 +416,7 @@ func parseChapters(spec string, max int) ([]int, error) {
 	return result, nil
 }
 
-func printDryRun(w io.Writer, format, input, output, textModel, ttsModel string, chapters []chapterInfo) error {
+func printDryRun(w io.Writer, format, input, output, textModel, ttsModel, mode string, chapters []chapterInfo) error {
 	if format == "json" {
 		type chapterJSON struct {
 			Index     int    `json:"index"`
@@ -418,6 +439,7 @@ func printDryRun(w io.Writer, format, input, output, textModel, ttsModel string,
 			Tool      string        `json:"tool"`
 			Input     string        `json:"input"`
 			Output    string        `json:"output"`
+			Mode      string        `json:"mode"`
 			TextModel string        `json:"text_model"`
 			TTSModel  string        `json:"tts_model"`
 			Chapters  []chapterJSON `json:"chapters"`
@@ -425,6 +447,7 @@ func printDryRun(w io.Writer, format, input, output, textModel, ttsModel string,
 			Tool:      "jeep-audiobook",
 			Input:     input,
 			Output:    output,
+			Mode:      mode,
 			TextModel: textModel,
 			TTSModel:  ttsModel,
 			Chapters:  chaps,
@@ -443,6 +466,7 @@ func printDryRun(w io.Writer, format, input, output, textModel, ttsModel string,
 		}
 	}
 	fmt.Fprintf(w, "Planned %d chapter(s) from %s\n", len(chapters), input)
+	fmt.Fprintf(w, "Mode:         %s\n", mode)
 	fmt.Fprintf(w, "Text model:   %s\n", textModel)
 	fmt.Fprintf(w, "TTS model:    %s\n", ttsModel)
 	fmt.Fprintf(w, "Output dir:   %s\n", output)

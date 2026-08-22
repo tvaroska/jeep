@@ -274,4 +274,72 @@ func TestPipeline_Integration(t *testing.T) {
 			t.Errorf("re-split output integrated loudness = %.2f LUFS, want within 2 LU of -16", li)
 		}
 	})
+
+	t.Run("AbstractModeShortForm", func(t *testing.T) {
+		outDir := t.TempDir()
+
+		// Fake generator that returns JSON with both summary and narration fields.
+		// Map reads summary, Reduce reads narration; extra fields are ignored.
+		fake := &fakeIntegrationGenerator{
+			result: &gemini.GenerateResult{
+				Text:         `{"summary":"s","narration":"An abstract."}`,
+				PromptTokens: 10,
+				OutputTokens: 5,
+			},
+		}
+
+		// Use Summarizer as the Preparer.
+		summarizer := &describe.Summarizer{
+			Client: fake,
+			Model:  "gemini-2.0-flash-001",
+			Mode:   describe.ModeAbstract,
+		}
+
+		synth := &realAudioSynth{seconds: 4.0}
+		runner := &Runner{
+			Source:         &fakeSource{doc: intgDoc()},
+			Weaver:         &describe.Weaver{Describer: describe.StubDescriber{}},
+			Preparer:       summarizer,
+			Synthesizer:    synth,
+			Concatenator:   &audio.FFmpegConcatenator{Normalize: true},
+			Prober:         &FFprobeProber{},
+			Cache:          &DiskCache{Dir: filepath.Join(outDir, ".cache")},
+			GeminiModel:    "stub",
+			TTSFingerprint: "m|v|s",
+		}
+
+		manifestPath, err := runner.Run(context.Background(), Options{InputPath: "book.pdf", OutputDir: outDir})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+
+		// Assert manifest parses with ≥1 chapter and positive duration.
+		m := readManifest(t, manifestPath)
+		if len(m.Chapters) < 1 {
+			t.Fatalf("manifest chapters: got %d, want ≥1", len(m.Chapters))
+		}
+		if m.Chapters[0].DurationSeconds <= 0 {
+			t.Errorf("chapter 1 duration: got %v, want > 0", m.Chapters[0].DurationSeconds)
+		}
+
+		// Prove the Summarizer was used (fake was called).
+		if fake.calls == 0 {
+			t.Error("fake generator was never called; Summarizer not used")
+		}
+	})
+}
+
+// fakeIntegrationGenerator implements describe.generator for pipeline integration tests.
+type fakeIntegrationGenerator struct {
+	result *gemini.GenerateResult
+	err    error
+	calls  int
+}
+
+func (f *fakeIntegrationGenerator) Generate(ctx context.Context, model, system string, contents []*genai.Content, search bool, schema *genai.Schema, opts *gemini.GenerateOptions) (*gemini.GenerateResult, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
 }

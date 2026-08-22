@@ -88,3 +88,39 @@ func TestMissingInputArg(t *testing.T) {
 		t.Errorf("error should mention missing input: %v", err)
 	}
 }
+
+func TestDryRun_InvalidMode(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"--dry-run", "--mode", "bogus", "../../internal/pdfsource/testdata/toc.pdf"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+	if !strings.Contains(err.Error(), "invalid --mode") {
+		t.Errorf("error should mention invalid --mode: %v", err)
+	}
+	if !strings.Contains(err.Error(), "full, summary, or abstract") {
+		t.Errorf("error should list valid modes: %v", err)
+	}
+}
+
+func TestDryRun_ValidMode(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"--dry-run", "--mode", "abstract", "../../internal/pdfsource/testdata/toc.pdf"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	// Should still list the 3 chapters (dry-run is mode-agnostic).
+	if !strings.Contains(out, "Chapter One") {
+		t.Errorf("dry-run missing 'Chapter One':\n%s", out)
+	}
+	if !strings.Contains(out, "Planned 3 chapter(s)") {
+		t.Errorf("dry-run missing planned count:\n%s", out)
+	}
+	// Should mention the mode.
+	if !strings.Contains(out, "Mode:") || !strings.Contains(out, "abstract") {
+		t.Errorf("dry-run should mention mode=abstract:\n%s", out)
+	}
+}

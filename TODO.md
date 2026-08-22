@@ -86,7 +86,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: wire the CLI on jeep's pflag `internal/cli` (RunMain/CommonFlags/Exitf) + `internal/config`. Flag parity: voice, style, resume, chapters, from/to-page, concurrency, output.
   - Accept: `go run ./cmd/jeep-audiobook --help` lists the flags; a dry-run on the test PDF prints the planned chapters without calling the model; binary builds; `go test ./...` green.
 
-- [ ] S1-ab-10 `--mode full|summary|abstract` via the map-reduce helper
+- [x] S1-ab-10 `--mode full|summary|abstract` via the map-reduce helper _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-7, S1-ab-9.
   - Scope: add the mode flag; summary/abstract use the map-reduce helper for over-window inputs.
   - Accept: `--mode abstract` on the test PDF (fake gemini) produces a short-form manifest; an invalid mode value errors clearly; `go test ./...` green.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/tvaroska/jeep/internal/gemini"
+	"github.com/tvaroska/jeep/internal/usage"
 	"google.golang.org/genai"
 )
 
@@ -21,7 +22,8 @@ type generator interface {
 // response into T. It is the building block for Map/Reduce closures: the caller
 // supplies the system+user prompt and a *genai.Schema whose shape matches T.
 // Retries are driven by opts.Retries (the gemini layer); this function adds none.
-func Step[T any](ctx context.Context, c generator, model, system, userText string, schema *genai.Schema, opts *gemini.GenerateOptions) (T, error) {
+// Usage is recorded via tracker if non-nil (nil-safe).
+func Step[T any](ctx context.Context, c generator, model, system, userText string, schema *genai.Schema, opts *gemini.GenerateOptions, tracker *usage.Tracker) (T, error) {
 	var zero T
 
 	// Build user content.
@@ -37,6 +39,9 @@ func Step[T any](ctx context.Context, c generator, model, system, userText strin
 	if err != nil {
 		return zero, err
 	}
+
+	// Record usage (nil-safe).
+	tracker.Record(model, int64(res.PromptTokens), int64(res.OutputTokens), int64(res.PromptTokens+res.OutputTokens))
 
 	// Unmarshal the JSON response.
 	var out T
