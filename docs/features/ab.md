@@ -822,3 +822,53 @@ A full real run against Vertex is out of scope for T2 — it needs GCP credentia
 **ePub + page flags is an error, not a silent no-op:** Page-less source with page flags errors clearly.
 
 **Stdout clean:** All diagnostics/progress go to stderr via `slog`; only the dry-run listing and the final success/JSON summary go to stdout (so `--format json` output stays parseable).
+
+---
+
+## Short-Form Audiobooks via Map-Reduce Condenser
+
+**Built:** 2026-08-22 (S1-ab-10)
+
+### What Was Built
+
+Added a `--mode full|summary|abstract` flag to `cmd/jeep-audiobook` that enables short-form audiobook generation. The `full` mode (default) preserves the existing behavior exactly, producing complete narration via `describe.GeminiPreparer`. The new `summary` and `abstract` modes produce condensed audiobooks by routing each chapter's woven text through a map-reduce condenser that chunks the content, maps each chunk to a partial summary via Gemini, and reduces the partials into a single listening-ready narration.
+
+### The Preparer Swap Pattern
+
+The entire feature is realized by introducing a new `describe.Summarizer` type that also implements the `describe.Preparer` interface. The pipeline orchestration remains completely unchanged — it runs `Weave → Preparer.Prepare(text) → segment → synthesize → concat → manifest` per chapter. The CLI selects which `Preparer` implementation to inject based on the mode flag: `GeminiPreparer` for full mode, or `Summarizer` (configured with `ModeSummary` or `ModeAbstract`) for short-form modes.
+
+This design keeps the pipeline format-agnostic and means `internal/pipeline` required zero modifications. The Summarizer receives the woven chapter text (with image descriptions already inline) and returns the condensed narration; everything downstream — segmentation, TTS, loudnorm, caching, manifest generation — is unchanged.
+
+### Map-Reduce Condensation
+
+`Summarizer.Prepare` chunks the incoming text (reusing the same `chunkForPrepare` helper as `GeminiPreparer`), then orchestrates a two-stage map-reduce workflow via `internal/mapreduce`:
+
+1. **Map stage:** Each chunk is sent to `mapreduce.Step` with a mode-specific prompt that instructs the model to produce a concise summary (for `summary` mode) or the single most important idea (for `abstract` mode). The response is structured JSON (`{"summary":"..."}`) that is unmarshaled into a `chunkSummary` struct.
+
+2. **Reduce stage:** All partial summaries are joined and sent to another `mapreduce.Step` call with a reduce prompt that combines them into a single coherent audiobook narration. The response is structured JSON (`{"narration":"..."}`) that becomes the final prepared text.
+
+Mode-specific prompts ensure the output flows naturally for audio narration: plain spoken prose, no markdown or bullets, no invented content. The `summary` mode preserves key points and main ideas across the whole chapter; `abstract` mode distills the chapter's essence into a few spoken sentences.
+
+### Usage Tracking Extension
+
+Extended `mapreduce.Step` to accept a trailing `*usage.Tracker` parameter (nil-safe). After each successful `gemini.Generate` call, the function records the prompt/output/total token counts. This lets summary and abstract runs report token consumption the same way full-mode runs do. All existing test call sites were updated to pass a trailing `nil` for the tracker parameter.
+
+### Files Touched
+
+- `internal/mapreduce/gemini.go` — extended `Step` signature to accept `*usage.Tracker`
+- `internal/mapreduce/gemini_test.go` — updated test call sites, added usage accumulation test
+- `internal/describe/summarize.go` (new) — `Mode` type, `ParseMode`, `Summarizer` struct, `Prepare` method, mode-specific prompts
+- `internal/describe/summarize_test.go` (new) — mode parsing, multi-chunk condenser, empty input, usage tracking, error propagation
+- `cmd/jeep-audiobook/main.go` — `--mode` flag, early validation, Preparer selection switch
+
+### Verification
+
+Unit tests demonstrate that `ParseMode` validates mode strings (case-insensitive), `Summarizer.Prepare` condenses multi-paragraph input through the map-reduce path and returns the final narration, empty input short-circuits with no API call, and usage accumulates across all map and reduce calls. An integration test in `internal/pipeline` proves that an abstract-mode run produces a valid manifest with real audio (via a fake generator and real ffmpeg).
+
+The acceptance criteria were executed offline (dry-run with invalid mode errors clearly; valid mode accepted) and online (summarizer reduces a multi-chunk input via fakes; abstract mode drives the pipeline end-to-end with real ffmpeg; full suite green with no new dependencies).
+
+### Known Limitations
+
+The narration cache key is computed from the Gemini text model and the page contents (pre-Prepare inputs), but does NOT include the mode. A resume run that changes mode over the same output directory could serve a stale full narration for a now-summary run. In practice, different modes typically write to different output directories, and `--resume` is opt-in, so this is a known limitation rather than a blocker. Folding mode into the cache key would require modifying `internal/pipeline`, which was out of scope for this task.
+
+The alternative mitigation — having the CLI append the mode to `Runner.GeminiModel` (e.g., `textModel + "|" + mode`) so the cache key naturally differs per mode — was considered but not implemented, to avoid muddying the model-resolution contract for a corner case.
