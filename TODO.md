@@ -51,7 +51,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: define `Section` (title, level, ordered content blocks: prose/figure/caption/code/table, children) and `Document{Meta, Sections}`. Port audi's 30–45-min chapter grouping + boilerplate-skip (`internal/pdfx/structure.go`) to walk the section tree instead of TOC+pages.
   - Accept: unit tests over a synthetic section tree reproduce audi's `structure_test.go` expectations (chapter expansion when ≥2 children; boilerplate titles — cover/copyright/toc/index/colophon — dropped); `go test ./...` green.
 
-- [ ] S1-ab-3 PDF `Source` on the pure-Go stack (pdfcpu outline+images, ledongthuc text)
+- [x] S1-ab-3 PDF `Source` on the pure-Go stack (pdfcpu outline+images, ledongthuc text) _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-2.
   - Scope: implement the `Source` seam for PDF — `pdfcpu api.Bookmarks()` → sections, `pdfcpu api.ExtractImages()` → figure blocks with page association, `ledongthuc GetPlainText` → prose. CGO-free (`CGO_ENABLED=0` must build). No MuPDF, no unidoc.
   - Accept: a test/example over `/home/boris/learning/audi/testdata/observability-engineering.pdf` yields 559 outline entries at 4 levels, extracts images with a page number, and returns non-empty prose per section; `CGO_ENABLED=0 go build ./...` succeeds.

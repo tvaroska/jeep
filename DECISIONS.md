@@ -15,6 +15,52 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — PDF `Source` adapter on the pure-Go stack (S1-ab-3)
+
+**Task:** S1-ab-3 · **Area:** infra (new package `internal/pdfsource`; `go.mod`/`go.sum`)
+
+**Decision:** Implemented `ingest.Source` for PDF in a new `internal/pdfsource`
+package on the phase-0 pure-Go stack: `pdfcpu api.Bookmarks()` (outline→section
+tree), `ledongthuc/pdf GetPlainText` (per-page prose, stored RAW), and `pdfcpu
+api.ExtractImages()` (figure blocks, page-associated via `img.PageNr`). Output is
+an `*ingest.Document` that `ingest.Structure` consumes unchanged; `internal/ingest`
+stays dependency-free (heavy deps live only in the adapter).
+
+Key design choices:
+1. **DFS page-span assignment:** each bookmark node's OWN span = `[startPage,
+   nextStart-1]` where `nextStart` is the next node's start in pre-order DFS (last
+   node runs to page count). The gap between a node and its first child is exactly
+   the node's intro pages; bookmarks sharing a page get an empty span, so prose is
+   never double-counted. Per span, emit prose block then that page's figures.
+2. **Front matter before the first bookmark is DROPPED** (cover/copyright/ToC;
+   `ingest.Structure` would drop it anyway; acceptance doesn't need it).
+3. **Empty-outline fallback:** no bookmarks → one synthetic top-level section with
+   all pages' prose + figures (mirrors audi's whole-doc fallback).
+4. **Page count from pdfcpu, text best-effort from ledongthuc:** pdfcpu's parser is
+   more lenient, so it is authoritative for span math; a ledongthuc open failure no
+   longer sinks the book (outline + images still ingest with empty prose).
+5. **Package `pdfsource` (not `pdf`, which collides with the ledongthuc import),
+   flat under `internal/`** like the other siblings; future `epubsource` etc.
+
+**Verified:** big-book test asserts 559 sections / 4 levels / ≥1 figure(Page>0) /
+~1.38M chars prose; fixture tests over toc/image/hello; `CGO_ENABLED=0 go build`
+exits 0.
+
+**Gotchas:**
+- `model.ConfigPath = "disable"` in `init()` to kill pdfcpu's config-dir side
+  effects/noise in sandboxes. Keep stdout clean — all diagnostics via `slog`
+  (stderr).
+- `ledpdf.Open` is stricter than pdfcpu about the header: it rejects `%PDF-1.3 `
+  (trailing space) in the `image.pdf` fixture. Text extraction MUST be best-effort.
+- `GetPlainText` can panic on malformed content — guard each page with `recover()`,
+  convert a bad page to empty prose, continue.
+- `model.Image` embeds `io.Reader`; read bytes with `io.ReadAll(img)` INSIDE the
+  digest callback (invalid after). `Width/Height` may be 0×0 — ignored here.
+- Store RAW ledongthuc text. Do NOT add a de-glue/ligature pass — repair is the
+  S1-ab-6 LLM prepare stage's job.
+
+---
+
 ## 2026-08-22 — Format-agnostic ingestion seam: page→tree translation (S1-ab-2)
 
 **Task:** S1-ab-2 · **Area:** infra (new package `internal/ingest`)

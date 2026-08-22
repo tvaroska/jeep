@@ -224,3 +224,95 @@ a trivial signature bump — but the default matches the surrounding codebase co
 **Boilerplate at top level only:** Only `doc.Sections` (the roots) are checked against
 `defaultSkipTitles`. Children of a boilerplate section are not individually filtered. This
 matches audi's behavior.
+
+---
+
+## PDF Source Adapter (pure-Go stack)
+
+**Built:** 2026-08-22 (S1-ab-3)
+
+### What Was Built
+
+`internal/pdfsource` implements the `ingest.Source` seam for PDF files on a
+CGO-free stack, producing an `*ingest.Document` that `ingest.Structure` consumes
+unchanged. Three pure-Go primitives are combined:
+
+- **Outline → section tree:** `pdfcpu api.Bookmarks()` yields a `[]pdfcpu.Bookmark`
+  tree (`Title`, `PageFrom`, `Kids`), converted to `ingest.Section` with 1-based
+  `Level` = nesting depth.
+- **Text → prose blocks:** `ledongthuc/pdf` `Page.GetPlainText(nil)` per page,
+  stored RAW (no de-glue/ligature repair — that belongs to the S1-ab-6 LLM stage).
+- **Images → figure blocks:** `pdfcpu api.ExtractImages()`, page-associated via
+  `img.PageNr`; bytes read inside the digest callback (the reader is invalid after
+  it returns), MIME mapped from `img.FileType`.
+
+The heavy PDF dependencies live ONLY in this adapter; `internal/ingest` stays
+dependency-free.
+
+### Page-span assignment (the novel part)
+
+pdfcpu gives one start page per bookmark, but `ingest.Section` needs each node's
+OWN intro prose plus `Children`. Spans are reconstructed via a pre-order DFS: a
+node's own span is `[startPage, nextStart-1]`, where `nextStart` is the start page
+of the NEXT node in DFS order (first child, else next sibling, else nearest
+ancestor's next sibling); the last node runs to the total page count. Because DFS
+pre-order visits a node then its children, the gap between a node and its first
+child is exactly that node's intro pages. Two bookmarks sharing a start page yield
+an empty span `[p, p-1]` for the earlier node, so prose is never double-counted.
+Each span's pages are emitted in order as a prose block (when non-empty) followed
+by that page's figure blocks, interleaving prose + figures by page.
+
+### Design decisions
+
+- **Front matter before the first bookmark is DROPPED** (`[1, firstStart-1]`):
+  almost always cover/copyright/ToC boilerplate that `ingest.Structure` would drop
+  anyway; acceptance does not require it. Simpler than a synthetic root.
+- **Empty-outline fallback:** a PDF with no bookmarks yields a single synthetic
+  top-level section (`Level 1`, empty title) holding every page's prose + figures,
+  mirroring audi's whole-document fallback.
+- **Page count comes from pdfcpu, not ledongthuc.** pdfcpu's parser is more lenient
+  than ledongthuc's header check, so it is authoritative for span math while text
+  extraction is best-effort.
+
+### Robustness
+
+- **pdfcpu config dir disabled:** `model.ConfigPath = "disable"` in `init()` avoids
+  config-dir side effects / noise in sandboxed environments.
+- **ledongthuc is best-effort:** if `ledpdf.Open` fails (it rejects some headers
+  pdfcpu accepts, e.g. `%PDF-1.3 ` with a trailing space in the `image.pdf`
+  fixture) the whole book still ingests with empty prose — outline + images survive.
+- **Per-page panic/error guard:** `GetPlainText` can panic on malformed content; a
+  `recover()` converts a bad page into empty prose (logged) instead of aborting.
+- **Clean stdout:** all diagnostics route through `slog` (stderr); nothing is
+  printed to stdout, per the agent-consumption constraint.
+
+### Verification
+
+- Fast unit tests over copied `toc.pdf`/`image.pdf`/`hello.pdf` fixtures: sections
+  + titles from `toc.pdf`; a `BlockFigure` with `image/png` MIME + `Page>0` from
+  `image.pdf`; fallback prose with a known word ("Hello, audiobook world") from
+  `hello.pdf`.
+- Gated T2 acceptance (`TestLoad_ObservabilityBook_MatchesSpike`, `t.Skip` when the
+  external 633-page PDF is absent): recursive section count == 559, max `Level` ==
+  4, ≥1 figure with `Page>0`, aggregate prose ~1.38M chars (>100k), and the sampled
+  "What Is Observability" chapter has non-empty prose.
+- `CGO_ENABLED=0 go build ./...` exits 0 (pure-Go requirement confirmed).
+
+### Files Created
+
+- `internal/pdfsource/pdfsource.go` — `Source`/`Load`, three extraction primitives,
+  DFS span-assignment tree builder, empty-outline fallback.
+- `internal/pdfsource/pdfsource_test.go` — fixture unit tests + gated big-book test.
+- `internal/pdfsource/testdata/{toc,image,hello}.pdf` — committed small fixtures.
+- `go.mod`/`go.sum` — added `pdfcpu v0.15.0` + `ledongthuc/pdf`.
+
+### Gotchas
+
+- **Do NOT add a deterministic de-glue/ligature pass.** ledongthuc glues
+  line-wrapped words and drops some heading ligatures; a geometry-based repair was
+  tried and failed (DECISIONS.md). Repair is the S1-ab-6 LLM prepare stage's job.
+- **`model.Image` embeds `io.Reader`** — read bytes with `io.ReadAll(img)` inside
+  the digest callback. `Width/Height` can report 0×0 for some PNG codec paths; the
+  emitted bytes are still valid, so dimensions are ignored here.
+- **Package name is `pdfsource`, not `pdf`** — `pdf` collides with the ledongthuc
+  import. It lives outside `internal/ingest` to keep that package dependency-free.
