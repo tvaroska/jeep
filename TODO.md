@@ -91,7 +91,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: add the mode flag; summary/abstract use the map-reduce helper for over-window inputs.
   - Accept: `--mode abstract` on the test PDF (fake gemini) produces a short-form manifest; an invalid mode value errors clearly; `go test ./...` green.
 
-- [ ] S1-ab-11 Chapter cover art via `gemini.GenerateImage` (ID3 embed + sidecar)
+- [x] S1-ab-11 Chapter cover art via `gemini.GenerateImage` (ID3 embed + sidecar) _(done 2026-08-22; see docs/features/ab.md)_
   - Deps: S1-ab-9.
   - Scope: `internal/art` seam → generate per-chapter art from title+summary; embed as ID3 APIC in each chapter MP3 (one ffmpeg mux) + write `out/chapter_NN.png` sidecar + `image` field in manifest. `--art generate|extract|book-cover|none`. See audi `docs/CHAPTER_IMAGES_PLAN.md`.
   - Accept: a test shows a chapter MP3 gains an embedded cover (ffprobe reports a video/attached_pic stream) and a sidecar PNG is written; `go test ./...` green.

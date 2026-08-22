@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 
+	"github.com/tvaroska/jeep/internal/art"
 	"github.com/tvaroska/jeep/internal/describe"
 )
 
@@ -143,10 +145,44 @@ func chapterCacheKey(ttsFingerprint, adapted string) string {
 	return hashKey([]byte("chapter-v1"), []byte(ttsFingerprint), []byte(adapted))
 }
 
+// artCacheKey keys the cover-art cache on the art mode, IMAGE model, chapter
+// title, and one-line summary — the inputs that determine a generated image.
+// Generation is non-deterministic AND paid, so caching (like narration) lets a
+// resume reuse the exact image.
+func artCacheKey(mode, model, title, summary string) string {
+	return hashKey([]byte("art-v1"), []byte(mode), []byte(model), []byte(title), []byte(summary))
+}
+
+// cachedArt is the cover image as stored in the "art" cache namespace. Data is
+// base64-encoded by encoding/json, which is fine for small cover images.
+type cachedArt struct {
+	MIMEType string `json:"mime"`
+	Data     []byte `json:"data"`
+}
+
+// encodeCachedArt serializes an art.Image for the cache.
+func encodeCachedArt(img art.Image) ([]byte, error) {
+	return json.Marshal(cachedArt{MIMEType: img.MIMEType, Data: img.Data})
+}
+
+// decodeCachedArt deserializes a cached cover image. It errors on malformed data
+// or empty bytes so the caller falls back to regeneration.
+func decodeCachedArt(data []byte) (art.Image, error) {
+	var ca cachedArt
+	if err := json.Unmarshal(data, &ca); err != nil {
+		return art.Image{}, err
+	}
+	if len(ca.Data) == 0 {
+		return art.Image{}, fmt.Errorf("cache: empty cover image")
+	}
+	return art.Image{Data: ca.Data, MIMEType: ca.MIMEType}, nil
+}
+
 // cachedChapter is the tiny completion record stored under the "chapters"
 // namespace so a resume can rebuild a chapter's manifest entry without
 // re-synthesizing, re-concatenating, or re-probing.
 type cachedChapter struct {
 	File            string  `json:"file"`             // basename, e.g. "chapter_01.mp3"
 	DurationSeconds float64 `json:"duration_seconds"` // so resume skips re-probing
+	Image           string  `json:"image,omitempty"`  // cover-art sidecar basename, e.g. "chapter_01.png"; empty when no art
 }

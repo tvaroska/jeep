@@ -28,6 +28,7 @@ type ChapterEntry struct {
 	DurationSeconds float64 `json:"duration_seconds"` // 0 if probing failed
 	StartPage       int     `json:"start_page"`       // 1-based inclusive; 0 for page-less formats
 	EndPage         int     `json:"end_page"`         // 1-based inclusive; 0 for page-less formats
+	Image           string  `json:"image,omitempty"`  // cover-art sidecar basename, e.g. "chapter_01.png"; empty when no art
 }
 
 // WriteManifest serializes m to path as indented JSON (with a trailing newline),

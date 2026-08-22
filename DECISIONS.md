@@ -15,6 +15,50 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Chapter cover art: `internal/art` seam + ID3 APIC embed + PNG sidecar (S1-ab-11)
+
+**Task:** S1-ab-11 · **Area:** feature (new packages `internal/art` + `internal/audio` embed seam)
+
+**Decision:** Added `--art generate|extract|book-cover|none` (default `none`, so
+existing behavior/cost/tests are unchanged). A new `internal/art` package produces
+a per-chapter cover `Image` via `Provider.ForChapter(ctx, title, summary,
+figures)`; a new `audio.FFmpegArtEmbedder` embeds it into each `chapter_NN.mp3` as
+an ID3v2 APIC frame (one ffmpeg mux); the pipeline writes a `chapter_NN.png`
+sidecar and records an `image` field in each manifest chapter entry.
+
+`internal/art` reaches the shared gemini client only through a package-local
+`imageClient` interface that `*gemini.Client` satisfies structurally (mirrors
+`describe.generator` / `audio.speechClient`) — `internal/gemini` untouched. The
+embed seam co-locates with `FFmpegConcatenator` and reuses its exec idiom.
+`Provider` mirrors `describe.GeminiPreparer` (concrete struct, injected client,
+nil-safe logger, no factory); book-cover mode memoizes one image via `sync.Once`.
+
+**Gotchas:**
+- **Never fail a run on art.** Every art step (generate, cache, sidecar, embed) is
+  Warn + continue; only audio-path errors stay fatal. The audio is the product.
+- **`-disposition:v attached_pic` is required** for ffprobe to report the image as
+  an attached picture (the acceptance signal). ffmpeg cannot rewrite in place — mux
+  to a temp file in the SAME dir, then `os.Rename` over the mp3 (atomic same-dir).
+- **Embed BEFORE the completion record** so a resume that hits the chapter
+  short-circuit can trust the mp3 already carries the APIC frame. The resume path
+  restores `ChapterEntry.Image` from the record only when the sidecar still exists
+  on disk (mirror the mp3 stat guard).
+- **Cache generated art** under an `"art"` namespace keyed on
+  mode+model+title+summary (generation is non-deterministic AND paid — same
+  reasoning as the narration cache). Cache errors are non-fatal.
+- **Sidecar must be real PNG.** extract figures can be JPEG; decode via stdlib
+  (`image` + blank `image/jpeg`/`image/png` decoders) and re-encode as PNG; fall
+  back to raw bytes only if decode fails. Pure-Go — no ffmpeg for the sidecar.
+- **One-line summary = deterministic narration prefix** (~200 chars, word-boundary
+  cut) — avoids an extra LLM call; documented v1 proxy for "a one-line summary".
+- **Validate `--art` BEFORE the dry-run branch** so `--dry-run --art bogus` errors
+  offline; dry-run never builds a client or resolves art.
+- **Book title = input filename stem** (not `ingest.Meta.Title`) to avoid a second
+  document load in the CLI; `ingest.Meta.Title` is available if richer context is
+  wanted later.
+
+---
+
 ## 2026-08-22 — `--mode full|summary|abstract` via map-reduce condenser (S1-ab-10)
 
 **Task:** S1-ab-10 · **Area:** feature (new flag + `describe.Summarizer`)

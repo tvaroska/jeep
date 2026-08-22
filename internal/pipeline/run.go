@@ -6,9 +6,13 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg" // register JPEG decoder for extract-mode figures
+	"image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,6 +21,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/tvaroska/jeep/internal/art"
 	"github.com/tvaroska/jeep/internal/audio"
 	"github.com/tvaroska/jeep/internal/describe"
 	"github.com/tvaroska/jeep/internal/ingest"
@@ -36,6 +41,15 @@ type Runner struct {
 	Concatenator audio.Concatenator
 	Prober       Prober       // nil-safe => &FFprobeProber{}
 	Log          *slog.Logger // nil-safe => slog.Default()
+
+	// Art, when non-nil and not in ModeNone, produces a per-chapter cover image
+	// that is written as a chapter_NN.png sidecar and embedded into the chapter
+	// mp3 as an ID3 APIC frame. nil => cover art disabled (default). Art failures
+	// are always non-fatal: the audio is the product, art is a nicety.
+	Art *art.Provider
+	// ArtEmbedder embeds the cover image into the mp3. nil-safe via r.artEmbedder()
+	// (defaults to &audio.FFmpegArtEmbedder{}); only consulted when Art is active.
+	ArtEmbedder audio.ArtEmbedder
 
 	// Concurrency bounds the per-chapter TTS worker pool (segments synthesized in
 	// parallel within a chapter; chapters stay sequential). <=0 => defaultConcurrency.
@@ -178,12 +192,22 @@ func (r *Runner) Run(ctx context.Context, opts Options) (string, error) {
 			var rec cachedChapter
 			if json.Unmarshal(data, &rec) == nil {
 				if _, statErr := os.Stat(chapterPath); statErr == nil {
+					// Surface the cover-art sidecar in the rebuilt manifest entry
+					// only if the record recorded one AND the file still exists on
+					// disk (mirror the mp3 stat guard above).
+					imageName := ""
+					if rec.Image != "" {
+						if _, err := os.Stat(filepath.Join(opts.OutputDir, rec.Image)); err == nil {
+							imageName = rec.Image
+						}
+					}
 					manifest.Chapters = append(manifest.Chapters, ChapterEntry{
 						Title:           title,
 						File:            filename,
 						DurationSeconds: rec.DurationSeconds,
 						StartPage:       startPage,
 						EndPage:         endPage,
+						Image:           imageName,
 					})
 					log.Info("resumed chapter from cache", "chapter", n, "title", title)
 					r.progress("[%d/%d] %s (resumed from cache)", i+1, total, title)
@@ -251,9 +275,30 @@ func (r *Runner) Run(ctx context.Context, opts Options) (string, error) {
 			durSeconds = dur.Seconds()
 		}
 
+		// Cover art (optional): produce a per-chapter image, write a chapter_NN.png
+		// sidecar, and embed it into the mp3 as an ID3 APIC frame. Done BEFORE the
+		// completion record so a resume that hits the short-circuit can trust the
+		// mp3 already carries the cover and skips re-embedding. Every art step is
+		// NON-FATAL: the audio is already written, so art errors Warn + continue.
+		imageName := ""
+		if r.Art != nil && r.Art.Mode != art.ModeNone {
+			if img, ok := r.chapterArt(ctx, c, log, ch, title, adapted, n); ok {
+				pngName := fmt.Sprintf("chapter_%02d.png", n)
+				pngPath := filepath.Join(opts.OutputDir, pngName)
+				if err := writePNGSidecar(pngPath, img); err != nil {
+					log.Warn("write cover sidecar failed", "chapter", n, "err", err) // NON-FATAL
+				} else {
+					imageName = pngName
+					if err := r.artEmbedder().Embed(ctx, chapterPath, img.Data, img.MIMEType); err != nil {
+						log.Warn("embed cover art failed", "chapter", n, "err", err) // NON-FATAL
+					}
+				}
+			}
+		}
+
 		// Write the completion record only AFTER concat+probe succeed, so a resume
 		// never short-circuits a chapter whose mp3 was not actually written. NON-FATAL.
-		if b, err := json.Marshal(cachedChapter{File: filename, DurationSeconds: durSeconds}); err == nil {
+		if b, err := json.Marshal(cachedChapter{File: filename, DurationSeconds: durSeconds, Image: imageName}); err == nil {
 			if err := c.Put("chapters", chapKey, b); err != nil {
 				log.Warn("chapter cache write failed", "chapter", n, "err", err) // NON-FATAL
 			}
@@ -265,6 +310,7 @@ func (r *Runner) Run(ctx context.Context, opts Options) (string, error) {
 			DurationSeconds: durSeconds,
 			StartPage:       startPage,
 			EndPage:         endPage,
+			Image:           imageName,
 		})
 		produced++
 	}
@@ -473,6 +519,121 @@ func (r *Runner) prober() Prober {
 		return r.Prober
 	}
 	return &FFprobeProber{Log: r.Log}
+}
+
+// artEmbedder returns r.ArtEmbedder if non-nil, else a default FFmpegArtEmbedder.
+// It is only ever called when r.Art is active.
+func (r *Runner) artEmbedder() audio.ArtEmbedder {
+	if r.ArtEmbedder != nil {
+		return r.ArtEmbedder
+	}
+	return &audio.FFmpegArtEmbedder{Log: r.Log}
+}
+
+// chapterArt produces the cover image for one chapter, consulting and populating
+// the "art" cache so a resume reuses the exact image without re-generating (image
+// generation is non-deterministic AND paid — cache it like narration). All cache
+// errors are NON-FATAL. It returns ok=false when there is deliberately no art
+// (e.g. extract with no figures) or when generation failed (already logged).
+func (r *Runner) chapterArt(ctx context.Context, c Cache, log *slog.Logger, ch ingest.Chapter, title, adapted string, n int) (art.Image, bool) {
+	summary := oneLineSummary(adapted)
+	key := artCacheKey(string(r.Art.Mode), r.Art.Model, title, summary)
+
+	// Cache read (level: art): a hit skips a paid, non-deterministic generation.
+	if data, ok, err := c.Get("art", key); err != nil {
+		log.Warn("art cache read failed; regenerating", "chapter", n, "err", err) // NON-FATAL
+	} else if ok {
+		if img, derr := decodeCachedArt(data); derr == nil {
+			log.Debug("art cache hit", "chapter", n)
+			return img, true
+		} else {
+			log.Warn("art cache decode failed; regenerating", "chapter", n, "err", derr) // NON-FATAL
+		}
+	}
+
+	img, ok, err := r.Art.ForChapter(ctx, title, summary, chapterFigures(ch))
+	if err != nil {
+		log.Warn("cover art generation failed; skipping chapter art", "chapter", n, "err", err) // NON-FATAL
+		return art.Image{}, false
+	}
+	if !ok {
+		return art.Image{}, false
+	}
+
+	if blob, merr := encodeCachedArt(img); merr == nil {
+		if err := c.Put("art", key, blob); err != nil {
+			log.Warn("art cache write failed", "chapter", n, "err", err) // NON-FATAL
+		}
+	}
+	return img, true
+}
+
+// chapterFigures collects a chapter's embedded figure images (pre-order DFS over
+// its Section subtree), for extract-mode cover art. Empty figures are skipped.
+func chapterFigures(ch ingest.Chapter) []art.Image {
+	var out []art.Image
+	var walk func(s *ingest.Section)
+	walk = func(s *ingest.Section) {
+		if s == nil {
+			return
+		}
+		for _, b := range s.Blocks {
+			if b.Kind == ingest.BlockFigure && len(b.Data) > 0 {
+				out = append(out, art.Image{Data: b.Data, MIMEType: b.MimeType})
+			}
+		}
+		for _, c := range s.Children {
+			walk(c)
+		}
+	}
+	for _, s := range ch.Sections {
+		walk(s)
+	}
+	return out
+}
+
+// oneLineSummary derives a deterministic one-line chapter summary from the
+// adapted narration: a whitespace-collapsed prefix of at most ~200 chars, cut on
+// a word boundary. This is the v1 choice (avoids an extra LLM call and is
+// stable): the audi plan wanted "a one-line summary"; a narration prefix is the
+// cheapest faithful proxy.
+func oneLineSummary(adapted string) string {
+	const max = 200
+	s := strings.Join(strings.Fields(adapted), " ")
+	if len(s) <= max {
+		return s
+	}
+	s = s[:max]
+	if i := strings.LastIndexByte(s, ' '); i > 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+// writePNGSidecar writes img to path as a valid PNG. The gemini image model
+// returns PNG, but extract-mode figures may be JPEG, so the bytes are decoded and
+// re-encoded as PNG to keep the .png filename honest. If decoding fails, the raw
+// bytes are written verbatim as a best-effort fallback.
+func writePNGSidecar(path string, img art.Image) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("sidecar: create dir: %w", err)
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(img.Data))
+	if err != nil {
+		// Fallback: write raw bytes so we still have a sidecar file.
+		if werr := os.WriteFile(path, img.Data, 0o644); werr != nil {
+			return fmt.Errorf("sidecar: write raw: %w", werr)
+		}
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, decoded); err != nil {
+		return fmt.Errorf("sidecar: encode png: %w", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("sidecar: write %q: %w", path, err)
+	}
+	return nil
 }
 
 // logger returns r.Log if non-nil, else slog.Default()

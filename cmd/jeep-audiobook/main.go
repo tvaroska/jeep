@@ -14,6 +14,7 @@ import (
 	"time"
 
 	flag "github.com/spf13/pflag"
+	"github.com/tvaroska/jeep/internal/art"
 	"github.com/tvaroska/jeep/internal/audio"
 	"github.com/tvaroska/jeep/internal/cli"
 	"github.com/tvaroska/jeep/internal/config"
@@ -32,7 +33,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	var voice, style, output, model, ttsModel, chaptersSpec, mode string
+	var voice, style, output, model, ttsModel, chaptersSpec, mode, artMode, imageModel string
 	var resume bool
 	var fromPage, toPage, concurrency int
 	var common cli.CommonFlags
@@ -42,6 +43,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	fs.StringVarP(&voice, "voice", "v", "Kore", "Voice name")
 	fs.StringVar(&style, "style", "", "Speaking style")
 	fs.StringVar(&mode, "mode", "full", "Narration mode: full, summary, or abstract")
+	fs.StringVar(&artMode, "art", "none", "Chapter cover art: generate, extract, book-cover, or none")
 	fs.BoolVar(&resume, "resume", false, "Resume from cached work")
 	fs.StringVar(&chaptersSpec, "chapters", "", "Comma-separated chapter indices/ranges (1-based), e.g. 1,3-5")
 	fs.IntVar(&fromPage, "from-page", 0, "Start page (PDF only, 0 = from start)")
@@ -50,6 +52,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	fs.StringVarP(&output, "output", "o", "audiobook", "Output directory")
 	fs.StringVar(&model, "model", "", "Text model name (for describe/prepare)")
 	fs.StringVar(&ttsModel, "tts-model", "", "TTS model name")
+	fs.StringVar(&imageModel, "image-model", "", "Image model name (for --art generate/book-cover)")
 	fs.Usage = func() { printUsage(fs, stderr) }
 
 	if done, err := cli.Parse(fs, args, "jeep-audiobook", stdout, &common); err != nil || done {
@@ -67,6 +70,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cli.Exitf(cli.ExitUsage, "invalid --mode: %w", err)
 	}
 
+	// Validate art mode early too (so dry-run rejects a bogus value offline).
+	parsedArtMode, err := art.ParseMode(artMode)
+	if err != nil {
+		return cli.Exitf(cli.ExitUsage, "invalid --art: %w", err)
+	}
+
 	cfg, err := cli.ResolveCommon(fs, &common.Project, &common.Region, &common.Quiet)
 	if err != nil {
 		return err
@@ -80,6 +89,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	resolvedTTSModel := ttsModel
 	if resolvedTTSModel == "" {
 		resolvedTTSModel = config.ResolveModelWithConfig(cfg, "TTS")
+	}
+	resolvedImageModel := imageModel
+	if resolvedImageModel == "" {
+		resolvedImageModel = config.ResolveModelWithConfig(cfg, "IMAGE")
 	}
 
 	// Build logger.
@@ -129,7 +142,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	// Dry-run: print planned chapters without building client.
 	if common.DryRun {
-		return printDryRun(stdout, common.Format, input, output, textModel, resolvedTTSModel, mode, selectedChapters)
+		return printDryRun(stdout, common.Format, input, output, textModel, resolvedTTSModel, mode, string(parsedArtMode), resolvedImageModel, selectedChapters)
 	}
 
 	// Real run: build client and execute pipeline.
@@ -203,6 +216,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 		Usage:          tracker,
 		Log:            logger,
 	}
+	// Cover art (optional). Default --art none leaves Art/ArtEmbedder nil, so
+	// existing behavior and cost are unchanged.
+	if parsedArtMode != art.ModeNone {
+		bookTitle := strings.TrimSuffix(filepath.Base(input), filepath.Ext(input))
+		runner.Art = &art.Provider{
+			Client:    client,
+			Model:     resolvedImageModel,
+			Mode:      parsedArtMode,
+			BookTitle: bookTitle,
+			Log:       logger,
+		}
+		runner.ArtEmbedder = &audio.FFmpegArtEmbedder{Log: logger}
+	}
+
 	if !common.Quiet {
 		runner.Progress = func(msg string) {
 			logger.Info(msg)
@@ -416,7 +443,7 @@ func parseChapters(spec string, max int) ([]int, error) {
 	return result, nil
 }
 
-func printDryRun(w io.Writer, format, input, output, textModel, ttsModel, mode string, chapters []chapterInfo) error {
+func printDryRun(w io.Writer, format, input, output, textModel, ttsModel, mode, artMode, imageModel string, chapters []chapterInfo) error {
 	if format == "json" {
 		type chapterJSON struct {
 			Index     int    `json:"index"`
@@ -436,21 +463,25 @@ func printDryRun(w io.Writer, format, input, output, textModel, ttsModel, mode s
 			chaps = append(chaps, c)
 		}
 		out := struct {
-			Tool      string        `json:"tool"`
-			Input     string        `json:"input"`
-			Output    string        `json:"output"`
-			Mode      string        `json:"mode"`
-			TextModel string        `json:"text_model"`
-			TTSModel  string        `json:"tts_model"`
-			Chapters  []chapterJSON `json:"chapters"`
+			Tool       string        `json:"tool"`
+			Input      string        `json:"input"`
+			Output     string        `json:"output"`
+			Mode       string        `json:"mode"`
+			Art        string        `json:"art"`
+			TextModel  string        `json:"text_model"`
+			TTSModel   string        `json:"tts_model"`
+			ImageModel string        `json:"image_model,omitempty"`
+			Chapters   []chapterJSON `json:"chapters"`
 		}{
-			Tool:      "jeep-audiobook",
-			Input:     input,
-			Output:    output,
-			Mode:      mode,
-			TextModel: textModel,
-			TTSModel:  ttsModel,
-			Chapters:  chaps,
+			Tool:       "jeep-audiobook",
+			Input:      input,
+			Output:     output,
+			Mode:       mode,
+			Art:        artMode,
+			TextModel:  textModel,
+			TTSModel:   ttsModel,
+			ImageModel: imageModelIfArt(artMode, imageModel),
+			Chapters:   chaps,
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -467,10 +498,23 @@ func printDryRun(w io.Writer, format, input, output, textModel, ttsModel, mode s
 	}
 	fmt.Fprintf(w, "Planned %d chapter(s) from %s\n", len(chapters), input)
 	fmt.Fprintf(w, "Mode:         %s\n", mode)
+	fmt.Fprintf(w, "Art:          %s\n", artMode)
 	fmt.Fprintf(w, "Text model:   %s\n", textModel)
 	fmt.Fprintf(w, "TTS model:    %s\n", ttsModel)
+	if artMode != string(art.ModeNone) && artMode != string(art.ModeExtract) {
+		fmt.Fprintf(w, "Image model:  %s\n", imageModel)
+	}
 	fmt.Fprintf(w, "Output dir:   %s\n", output)
 	return nil
+}
+
+// imageModelIfArt returns the resolved IMAGE model only when the art mode
+// actually generates images (generate/book-cover); extract and none omit it.
+func imageModelIfArt(artMode, imageModel string) string {
+	if artMode == string(art.ModeGenerate) || artMode == string(art.ModeBookCover) {
+		return imageModel
+	}
+	return ""
 }
 
 func printUsage(fs *flag.FlagSet, w io.Writer) {
@@ -486,6 +530,7 @@ Examples:
   jeep-audiobook book.pdf
   jeep-audiobook -v Puck --chapters 1,3-5 book.epub -o output
   jeep-audiobook --dry-run --from-page 10 --to-page 50 book.pdf
+  jeep-audiobook --art generate book.pdf
   jeep-audiobook --resume book.pdf
 `)
 }

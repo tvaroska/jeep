@@ -872,3 +872,106 @@ The acceptance criteria were executed offline (dry-run with invalid mode errors 
 The narration cache key is computed from the Gemini text model and the page contents (pre-Prepare inputs), but does NOT include the mode. A resume run that changes mode over the same output directory could serve a stale full narration for a now-summary run. In practice, different modes typically write to different output directories, and `--resume` is opt-in, so this is a known limitation rather than a blocker. Folding mode into the cache key would require modifying `internal/pipeline`, which was out of scope for this task.
 
 The alternative mitigation — having the CLI append the mode to `Runner.GeminiModel` (e.g., `textModel + "|" + mode`) so the cache key naturally differs per mode — was considered but not implemented, to avoid muddying the model-resolution contract for a corner case.
+
+---
+
+## Chapter Cover Art (ID3 APIC embed + PNG sidecar)
+
+**Built:** 2026-08-22 (S1-ab-11)
+
+### What Was Built
+
+Per-chapter cover art for the audiobook pipeline, driven by a new `--art
+generate|extract|book-cover|none` flag (default `none`, so existing behavior and
+cost are unchanged). When active, each `chapter_NN.mp3` gains an embedded cover
+image (an ID3v2 APIC "attached picture" frame) and a matching `chapter_NN.png`
+sidecar is written alongside it, with an `image` field recorded in each
+manifest chapter entry.
+
+### The `internal/art` Seam
+
+A new package `internal/art` owns image production. Following the mandatory
+package-local-narrow-interface pattern (DECISIONS.md S1-ab-1/6/8), it reaches the
+shared gemini client only through a local `imageClient` interface that
+`*gemini.Client` satisfies structurally; tests inject a fake. `internal/gemini`
+is untouched.
+
+- `Mode` + `ParseMode` mirror `describe.ParseMode` (values: generate, extract,
+  book-cover, none; invalid values yield a clear error).
+- `Provider.ForChapter(ctx, title, summary, figures)` returns `(Image, ok, err)`:
+  - **generate** builds a prompt from a house-style prefix + book/chapter title +
+    a one-line summary and calls the IMAGE model.
+  - **book-cover** generates one image (memoized via `sync.Once`) reused for all
+    chapters.
+  - **extract** picks the largest embedded figure (by byte length), no API call;
+    a chapter with no figure simply gets no art (`ok=false`, not an error).
+  - **none** yields `ok=false`.
+
+### The `internal/audio` Embed Seam
+
+`FFmpegArtEmbedder.Embed` muxes the cover into the mp3 via one ffmpeg call
+(`-map 0:a -map 1:v -c:a copy -c:v copy -disposition:v attached_pic`), writing to
+a temp file in the same directory and renaming over the original (ffmpeg cannot
+rewrite in place). The `-disposition:v attached_pic` flag is what makes ffprobe
+report the stream as an attached picture. It mirrors `FFmpegConcatenator`'s exec
+idiom (captured stderr, tail-on-error, nil-safe logger) and is injectable behind
+the `ArtEmbedder` interface.
+
+### Pipeline Wiring
+
+`Runner` gained `Art *art.Provider` (nil => disabled) and `ArtEmbedder
+audio.ArtEmbedder` (nil-safe default `&audio.FFmpegArtEmbedder{}`). After
+concat+probe and BEFORE the completion record is written, the pipeline produces
+the cover, writes the PNG sidecar, and embeds it. Embedding before the record
+means a resume that hits the chapter short-circuit can trust the mp3 already
+carries the APIC frame. Every art step is NON-FATAL (Warn + continue): the audio
+is the product, art is a nicety.
+
+- Generated art is cached under a new `"art"` namespace keyed on
+  mode+model+title+summary, so a resume reuses the exact (paid, non-deterministic)
+  image. `cachedChapter` and `ChapterEntry` gained an `Image` field; the resume
+  short-circuit restores it only when the sidecar file still exists on disk.
+- The one-line summary is a deterministic whitespace-collapsed ~200-char prefix
+  of the adapted narration (cheapest faithful proxy for "a one-line summary";
+  avoids an extra LLM call).
+- The PNG sidecar is always a valid PNG: bytes are decoded (`image/jpeg` +
+  `image/png` stdlib decoders) and re-encoded as PNG so extract-mode JPEG figures
+  still land in an honest `.png` file; on decode failure the raw bytes are written
+  as a fallback. Pure-Go, no ffmpeg needed for the sidecar.
+
+### Files Touched
+
+- `internal/art/art.go`, `internal/art/art_test.go` (new)
+- `internal/audio/embed.go`, `internal/audio/embed_test.go` (new)
+- `internal/pipeline/run.go` — Art/ArtEmbedder fields, art hook, helpers
+  (`artEmbedder`, `chapterArt`, `chapterFigures`, `oneLineSummary`,
+  `writePNGSidecar`)
+- `internal/pipeline/cache.go` — `art` cache key + `cachedArt` codec + `Image`
+  on `cachedChapter`
+- `internal/pipeline/manifest.go` — `Image` on `ChapterEntry`
+- `internal/pipeline/run_art_integration_test.go` (new)
+- `cmd/jeep-audiobook/main.go` — `--art` + `--image-model` flags, early
+  validation, IMAGE model resolve, dry-run plan, real-branch provider+embedder
+  wiring
+
+### Verification
+
+Unit tests (`internal/art`) prove generate calls the fake client and returns
+bytes, extract picks the largest figure, extract-with-no-figures and none return
+`ok=false`, `ParseMode` rejects a bogus value, and book-cover calls the client
+once across two chapters. An `internal/audio` test embeds a real PNG into a real
+MP3 and asserts (via ffprobe) an attached-picture video stream. A pipeline
+integration test over the two-chapter fixture (fake image client + real
+`FFmpegArtEmbedder`) asserts the sidecar is written, the manifest records
+`chapter_01.png`, and the mp3 gains an attached-picture stream. CLI checks
+confirm `--help` lists `--art`, a bogus mode errors clearly and offline, and a
+valid generate dry-run prints the plan (including art mode + image model) with no
+API call. Full suite green; `CGO_ENABLED=0` build succeeds; `go mod tidy` adds no
+dependency; `internal/gemini/` untouched.
+
+### Notes / Deviations
+
+- The book title used for prompt context is derived from the input filename stem
+  (rather than `ingest.Meta.Title`) to avoid a second document load in the CLI
+  layer — a pragmatic v1 choice; `ingest.Meta` does carry a `Title` field if
+  richer context is wanted later.
