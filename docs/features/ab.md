@@ -975,3 +975,93 @@ dependency; `internal/gemini/` untouched.
   (rather than `ingest.Meta.Title`) to avoid a second document load in the CLI
   layer — a pragmatic v1 choice; `ingest.Meta` does carry a `Title` field if
   richer context is wanted later.
+
+---
+
+## Markdown/Plain-Text + HTML/Web-Article Source Adapters
+
+**Built:** 2026-08-22 (S1-ab-12)
+
+### What Was Built
+
+Added two new format adapters to `jeep-audiobook` so it can now ingest Markdown/plain-text and HTML/web-article inputs, producing the same `*ingest.Document` Section tree that PDF and ePub already emit. Each adapter implements the existing `ingest.Source` seam and requires no changes to `internal/gemini`, the pipeline, or any CRITICAL path.
+
+The implementation consists of three new components:
+1. **`internal/ingest/headings.go`** — A shared stdlib-only helper that converts flat heading-delimited content into a nested Section tree using a level-stack algorithm
+2. **`internal/mdsource`** — Pure stdlib line scanner for ATX markdown headings, fenced code blocks, and prose
+3. **`internal/htmlsource`** — `golang.org/x/net/html` walk with readability-style main-content selection and boilerplate stripping
+
+### The Shared Nesting Helper
+
+Both adapters reduce their format to a flat, ordered list of `HeadingItem` (a heading level + title + the content blocks under it) and call `ingest.SectionsFromHeadings` to build the nested tree. This keeps the nesting logic tested in one place rather than duplicated across adapters.
+
+The level-stack algorithm handles skipped levels gracefully: an h1 followed by an h3 nests the h3 under the h1, not as a sibling. When a document has content before its first heading (or no headings at all), the adapter prepends a single top-level `HeadingItem{Level:1, Title:"", Blocks: <preamble>}` so a headingless plain-text file becomes one untitled section holding all prose.
+
+### Markdown Parser
+
+The `internal/mdsource` adapter uses a pure stdlib line scanner (no goldmark or markdown library) to parse:
+- **ATX headings:** Lines matching `^(#{1,6})\s+(.*)` open a new heading; level = count of `#`, title = trimmed remainder (trailing `#` stripped)
+- **Fenced code:** Lines starting with ` ``` ` or `~~~` toggle a code fence; everything between the fences is one `BlockCode` (verbatim, including any `#` inside)
+- **Prose:** Consecutive non-heading, non-fence lines accumulate into one `BlockProse` (joined with `\n`, trimmed, dropped if empty)
+
+Setext headings (`===`/`---` underlines) are out of scope for v1. Images (`![alt](url)`) are not extracted since they're remote URLs, not local bytes. `Meta.Title` is set to the first level-1 heading if present.
+
+### HTML Parser
+
+The `internal/htmlsource` adapter uses `golang.org/x/net/html` (already a direct dependency, promoted from indirect) to parse web articles with readability-style heuristics:
+- **Main-content selection:** Find the first `<article>`; else first `<main>`; else `<body>`; else document root
+- **Boilerplate strip:** Skip entire subtrees of `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, `<form>`, and elements with `role="navigation"` (making `<body>` fallback usable)
+- **Headings:** `<h1>`..`<h6>` become heading items, Level = the digit
+- **Code:** `<pre>` subtrees become `BlockCode` with text content (preserving newlines; whitespace NOT collapsed inside pre)
+- **Prose:** Visible text outside headings/pre accumulates, whitespace-collapsed via `strings.Fields`, flushed into `BlockProse` on the next heading/pre/end
+
+Remote `<img>` (http/https/`//`) are skipped — no network fetch. `data:` URI images are also skipped for v1. `Meta.Title` comes from the `<title>` element, else the first heading.
+
+### CLI Integration
+
+Extended `cmd/jeep-audiobook/main.go` so the adapters are reachable:
+- `.md`, `.markdown`, `.txt`, `.text` → `&mdsource.Source{Log: logger}`
+- `.html`, `.htm` → `&htmlsource.Source{Log: logger}`
+- Updated help text from "PDF or ePub" to "PDF, ePub, Markdown, or HTML file"
+- Updated the unsupported-format error to list `.pdf, .epub, .md, .txt, .html`
+
+The existing `cmd/jeep-audiobook/dryrun_test.go` test used `foo.txt` as its "unsupported" example. Once `.txt` mapped to `mdsource`, that input was no longer unsupported and the test broke. The fix: changed the test argument to `foo.docx` (genuinely unsupported).
+
+### Files Created
+
+- `internal/ingest/headings.go`, `internal/ingest/headings_test.go`
+- `internal/mdsource/mdsource.go`, `internal/mdsource/mdsource_test.go`, `internal/mdsource/testdata/article.md`
+- `internal/htmlsource/htmlsource.go`, `internal/htmlsource/htmlsource_test.go`, `internal/htmlsource/testdata/article.html`
+
+### Files Modified
+
+- `cmd/jeep-audiobook/main.go` — `selectSource` switch, imports, `printUsage`
+- `cmd/jeep-audiobook/dryrun_test.go` — changed `foo.txt` to `foo.docx`
+
+### Why This Approach
+
+**Two packages, not one:** Following the existing pdfsource/epubsource sibling convention keeps format-specific parsing isolated. The shared tree-building logic was factored into `internal/ingest/headings.go` rather than duplicated.
+
+**Shared helper in `internal/ingest`:** Both adapters need identical nesting; one tested implementation beats two copies. The helper is pure stdlib so `ingest` stays dependency-free and off CRITICAL. The alternative — a private copy in each adapter — was rejected to avoid divergence.
+
+**Stdlib-only markdown parser:** A line scanner covers the acceptance scope (ATX headings + fenced code + prose) with no new dependency. `goldmark` or a full markdown library would be overkill and add weight.
+
+**Readability-style HTML selection:** Main-content detection (prefer `<article>`, else `<main>`, else `<body>`) plus boilerplate strip makes the adapter usable on real web pages without ingesting menus and footers. `golang.org/x/net/html` was the robust, CGO-free choice and was already present as an indirect dependency.
+
+**No network fetch:** Remote images are skipped. This keeps the tool offline-capable and avoids network errors/latency/security concerns. A local PDF with embedded images works; a web article referencing CDN images does not (documented v1 limitation).
+
+### Verification
+
+Unit tests cover the happy path (correct section titles/levels, code blocks, prose blocks present) and edge cases (preamble handling, no-heading files, boilerplate stripped). The CLI end-to-end dry-run acceptance proved the adapters are reachable: running `--dry-run` on `article.md` and `article.html` prints the planned chapters without contacting Vertex AI, and an unsupported `.docx` errors clearly. Full suite green; `CGO_ENABLED=0 go build ./...` exits 0 (pure-Go); `go mod tidy` shows no new dependency added (`golang.org/x/net` was already direct); `git diff --stat` shows no files under CRITICAL paths.
+
+### Gotchas
+
+**The sibling test break was mandatory:** `cmd/jeep-audiobook/dryrun_test.go:71` used `foo.txt` as its "unsupported" input. Once `.txt` became supported, the test's assertion broke. Changing it to `foo.docx` was required to keep T1 green.
+
+**ATX only for v1:** Setext headings (`===`/`---` underlines) are not parsed. This is documented in the mdsource package comment as a known limitation.
+
+**No images from markdown/HTML:** Markdown images are remote references (no local bytes); HTML images require network fetch or data-URI decoding (deferred). Acceptance does not require them. Narration is prose + code.
+
+**Boilerplate strip is load-bearing:** Without skipping `<nav>`/`<header>`/`<footer>`, the `<body>` fallback would ingest entire menus and site chrome. The strip list makes web articles usable.
+
+**Whitespace collapse in HTML:** Text from HTML layout has whitespace collapsed (`strings.Fields`) per the browser rendering model. This is distinct from "no word-level rewriting" — layout whitespace is part of the format, not content.

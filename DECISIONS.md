@@ -15,6 +15,30 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Markdown/plain-text + HTML/web-article `Source` adapters (S1-ab-12)
+
+**Task:** S1-ab-12 · **Area:** feature (new packages `internal/mdsource`, `internal/htmlsource`; shared helper in `internal/ingest`)
+
+**Decision:** Added two new format adapters behind the existing `ingest.Source` seam so `jeep-audiobook` can ingest Markdown/plain-text and HTML/web-article inputs, producing the same Section tree that PDF and ePub already emit. Both adapters are pure-Go (stdlib + `golang.org/x/net/html` for HTML, which was already a direct dependency), and neither touches `internal/gemini`, the pipeline, or any CRITICAL path.
+
+Key design choices:
+1. **Two packages, not one:** `internal/mdsource` and `internal/htmlsource` match the existing pdfsource/epubsource sibling convention, keeping format-specific parsing isolated.
+2. **Shared nesting helper in `internal/ingest`:** Both adapters reduce their format to a flat `[]HeadingItem` (level + title + blocks) and call a new `ingest.SectionsFromHeadings` function that builds the nested tree via a level-stack algorithm. One tested implementation beats two copies, and it's pure stdlib so `ingest` stays dependency-free.
+3. **Markdown parser = pure stdlib line scanner:** ATX headings (`^#{1,6}\s+...`), fenced code (` ``` `/`~~~` toggle), and prose runs. No goldmark or markdown library needed. Setext headings (`===`/`---` underlines) are out of scope for v1.
+4. **HTML parser = readability-style main-content selection:** Find first `<article>`, else `<main>`, else `<body>`; skip entire subtrees of `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, `<form>`, and `role="navigation"`. This makes the `<body>` fallback usable on real web pages.
+5. **No images:** Markdown images are remote URLs (no local bytes); HTML `<img>` require network fetch or data-URI decoding (deferred). Narration is prose + code.
+
+**Verified:** Unit tests cover section tree building (headings, nesting, preamble, code blocks), boilerplate stripping (HTML nav/header/footer text absent), and edge cases (no-heading input → one Level-1 section); CLI dry-run proves both adapters are reachable via the CLI (`.md`/`.html` inputs print planned chapters offline); full suite green; `CGO_ENABLED=0 go build ./...` exits 0; `go mod tidy` adds NO new dependency (`golang.org/x/net` promoted from indirect to direct, already in go.sum); `git diff --stat` shows no CRITICAL paths touched.
+
+**Gotchas:**
+- **The sibling test break was mandatory:** `cmd/jeep-audiobook/dryrun_test.go:71` used `foo.txt` as its "unsupported" example. Once `.txt` mapped to `mdsource`, the test broke (file-not-found, not "unsupported"). Changed it to `foo.docx` (genuinely unsupported) to keep T1 green.
+- **ATX only for v1:** Setext headings (`===`/`---` underlines) are NOT parsed. Documented in the mdsource package comment as a known limitation.
+- **Boilerplate strip is load-bearing for HTML:** Without skipping `<nav>`/`<header>`/`<footer>`, the `<body>` fallback would ingest entire menus/site chrome.
+- **Whitespace collapse in HTML is allowed:** Layout whitespace (runs of `\n`/`\t`/` ` → single space via `strings.Fields`) is part of the format, not content. Word-level rewriting is still forbidden (DECISIONS.md S1-ab-3/4/6).
+- **Preamble handling is in the adapter, not the helper:** When a document has content before its first heading (or no headings at all), the adapter prepends a `HeadingItem{Level:1, Title:"", Blocks: <preamble>}` so the helper sees a well-formed input.
+
+---
+
 ## 2026-08-22 — Chapter cover art: `internal/art` seam + ID3 APIC embed + PNG sidecar (S1-ab-11)
 
 **Task:** S1-ab-11 · **Area:** feature (new packages `internal/art` + `internal/audio` embed seam)
