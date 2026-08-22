@@ -685,3 +685,140 @@ All cache read/write errors are NON-FATAL: log at Warn and treat as miss/no-op, 
 **Per-chapter image streaming was NOT ported.** audi streamed cover art / per-chapter ID3 art; that is out of scope here and lands in S1-ab-11. The manifest carries text + duration + page span only.
 
 **`--from-page`/`--to-page` has no meaning over a Section tree** and was dropped from `Options`. If page-window selection parity is still wanted for PDFs, it belongs in the S1-ab-9 CLI as a page→chapter-index resolution step — PROPOSED, not implemented here.
+
+---
+
+## CLI Integration (jeep-audiobook command)
+
+**Built:** 2026-08-22 (S1-ab-9)
+
+### What Was Built
+
+Added the fifth jeep CLI tool, `cmd/jeep-audiobook`, that wires the finished audiobook pipeline (`internal/pipeline`, `internal/audio`, `internal/describe`, ingestion sources) onto jeep's shared CLI plumbing (`internal/cli` for RunMain/CommonFlags/Parse/Exitf and `internal/config` for model resolution). This is the final integration seam — all internal packages were already built and tested; this task is almost entirely wiring in a single new `main.go` package.
+
+The tool takes a PDF or ePub input file and produces a directory of narrated MP3 chapters plus a manifest. It supports dry-run mode (no API calls, just prints planned chapters), chapter selection (by index or page window), resumable runs, voice/style customization, and both text and JSON output formats.
+
+### Core Flags and Arguments
+
+**Positional argument:** The input file path (PDF or ePub). NOT a prompt — no `cli.ResolvePrompt` is used.
+
+**Common flags** (via `cli.CommonFlags` with 30-minute default timeout):
+`--project`, `--region`, `--format` (text/json), `--quiet`, `--dry-run`, `--version`, `--timeout`, `--retry`
+
+**Audiobook-specific flags:**
+- `--voice` / `-v` — TTS voice name (default `"Kore"`)
+- `--style` — narration style instructions (default `""`)
+- `--resume` — enable DiskCache under `<output>/.cache` (default `false`)
+- `--chapters` — comma-separated 1-based indices and ranges, e.g. `"1,3-5"` (default `""` = all chapters)
+- `--from-page` / `--to-page` — PDF page window (0 = unbounded); resolved to chapter indices in the CLI layer
+- `--concurrency` — worker pool size (default `0` = pipeline/describe defaults of 4)
+- `--output` / `-o` — OUTPUT DIRECTORY (default `"audiobook"`)
+- `--model` — override text model for describe/prepare (default `""` = resolve TEXT)
+- `--tts-model` — override TTS model for synthesis (default `""` = resolve TTS)
+
+### Page-Window to Chapter-Index Resolution
+
+One of the non-trivial design decisions: `--from-page` and `--to-page` flags provide parity with audi's page-window selection, but `pipeline.Options` dropped page fields (meaningless over a Section tree). The resolution happens **in the CLI layer** to avoid reintroducing page fields into the pipeline:
+
+1. Load the document with the selected Source and run `ingest.Structure` (via helper `planChapters`)
+2. Compute each chapter's `(start, end)` page span by DFS over its `Section` blocks' `Page` fields (min non-zero → start, max → end)
+3. A chapter is IN the window if `end >= fromPage` (when fromPage>0) AND `start <= toPage` (when toPage>0)
+4. Page-less formats (ePub) yield 0/0 spans; using page flags with a page-less source errors clearly
+5. Union the page-derived indices with any explicit `--chapters` indices and pass the final sorted `[]int` as `pipeline.Options.Chapters`
+
+This keeps the change confined to `cmd/jeep-audiobook` without modifying pipeline internals. The tiny span-walk logic (~15 lines) is replicated locally rather than exporting `pipeline.chapterPageSpan`.
+
+### Source Selection by Extension
+
+`switch strings.ToLower(filepath.Ext(input))`:
+- `.pdf` → `&pdfsource.Source{Log: logger}`
+- `.epub` → `&epubsource.Source{Log: logger}`
+- default → `cli.Exitf(cli.ExitUsage, "unsupported input format %q (supported: .pdf, .epub)", ext)`
+
+Markdown and HTML adapters land in S1-ab-12 and are not included here.
+
+### Dry-Run Behavior (Acceptance-Critical)
+
+When `--dry-run`: load the document, apply the same chapter/page selection logic, and print the planned chapters WITHOUT constructing a `*gemini.Client` or calling `Runner.Run`. This mirrors how other tools print before any API call, but lists chapters instead of showing prompt length:
+
+- **text format:** one line per selected chapter: `Chapter %d: %s (pages %d-%d)` (omit page suffix when both are 0), then a trailing summary showing planned count, input, output dir, and resolved models
+- **json format:** `{"tool":"jeep-audiobook","input":...,"output":...,"text_model":...,"tts_model":...,"chapters":[{"index":...,"title":...,"start_page":...,"end_page":...}]}` via `json.NewEncoder(stdout)` with two-space indent
+
+Model resolution (`config.ResolveModelWithConfig`) is offline/pure, so models can be shown in dry-run output even though no client is built.
+
+### Model and Seam Wiring
+
+**Model resolution:**
+- describe (`GeminiDescriber.Model`) and prepare (`GeminiPreparer.Model`) use `config.ResolveModelWithConfig(cfg, "TEXT")`
+- TTS (`GeminiSynthesizer.Model`) uses `config.ResolveModelWithConfig(cfg, "TTS")`
+- Overridden by `--model` (text) and `--tts-model` flags when non-empty
+
+**Seam construction** (all consumed, none modified):
+- `*gemini.Client` — constructed via `gemini.NewClient(ctx, project, region)` ONLY on a real run, AFTER the dry-run short-circuit
+- `describe.GeminiDescriber` — `{Client: client, Model: textModel, Usage: tracker}`, wrapped in `&describe.Weaver{Describer: ..., Concurrency: conc}`
+- `describe.GeminiPreparer` — `{Client: client, Model: textModel, Concurrency: conc, Usage: tracker}` (pointer; satisfies `describe.Preparer`)
+- `audio.GeminiSynthesizer` — `{Client: client, Model: ttsModel, Voice: voice, Style: style}` (pointer; satisfies `audio.Synthesizer`)
+- `audio.FFmpegConcatenator` — `{Normalize: true}` (loudnorm on by default for podcast target)
+- `pipeline.DiskCache` — `{Dir: filepath.Join(outputDir, ".cache")}` ONLY when `--resume`; else leave `Runner.Cache` nil (nopCache)
+- `usage.Tracker` — `usage.New()`, passed to describe/prepare adapters AND `Runner.Usage`
+
+**`Runner` field wiring:**
+`Source`, `Weaver`, `Preparer`, `Synthesizer`, `Concatenator`, `Concurrency`, `Cache`, `GeminiModel: textModel`, `TTSFingerprint: fmt.Sprintf("%s|%s|%s", ttsModel, voice, style)`, `Usage: tracker`, `Log`, and optionally `Progress` (only when `!quiet`, writes to stderr).
+
+### Why This Approach
+
+**Mirrors jeep-tts, not audi's cobra/viper CLI:** The binding decision (DECISIONS.md S1-ab-9) is to use jeep's existing CLI infrastructure for consistency across all five tools. This means `flag.FlagSet` + `cli.CommonFlags` + `cli.ResolveCommon`, not introducing a second CLI framework.
+
+**Page-window in CLI, not pipeline:** Resolving page flags to chapter indices in the CLI layer keeps the pipeline format-agnostic. The alternative — reintroducing `FromPage`/`ToPage` into `pipeline.Options` — would make ePub/markdown/HTML support awkward. The CLI-side mapping uses each chapter's `[StartPage,EndPage]` span (already computed for the manifest) to filter, then passes a simple `[]int` to the pipeline.
+
+**Output is a DIRECTORY:** Unlike `jeep-tts` which writes a single output WAV file, `jeep-audiobook` writes `chapter_01.mp3`, `chapter_02.mp3`, ..., `manifest.json` into the output directory. The cache lives at `<output>/.cache` when `--resume`. This matches the audi behavior and reflects the multi-chapter nature of audiobook runs.
+
+**TTSFingerprint format:** `fmt.Sprintf("%s|%s|%s", ttsModel, voice, style)` ensures the segment/chapter cache keys change when voice, style, or TTS model change. Without this, a `--resume` run with different settings would replay stale audio from the first run. This format was established in S1-ab-8.
+
+**Stdout cleanliness:** All diagnostics and progress go to stderr via `slog`; only the dry-run listing and the final success/JSON summary go to stdout. This keeps `--format json` output parseable, matching the other tools.
+
+### Verification
+
+**Unit tests** (all offline, no gemini, no ffmpeg):
+- Help test: `--help` returns `pflag.ErrHelp`; stderr lists all eight audiobook flags
+- Dry-run text: bogus project + `--dry-run` + fixture PDF prints chapter titles and count with no network error (proves no client was built)
+- Dry-run JSON: same with `--format json`; unmarshal stdout and assert `tool=="jeep-audiobook"` and `len(chapters)==3`
+- Chapter selection: `--chapters 1,3` yields exactly two chapters
+- Unsupported extension: `foo.txt` errors with usage message
+- Missing input: no positional arg errors clearly
+
+**T2 acceptance:**
+1. `go run ./cmd/jeep-audiobook --help 2>&1 | grep -E -- '--voice|--style|--resume|--chapters|--from-page|--to-page|--concurrency|--output'` shows all eight flags
+2. `GOOGLE_CLOUD_PROJECT=does-not-matter go run ./cmd/jeep-audiobook --dry-run ./internal/pdfsource/testdata/toc.pdf` lists three chapters and exits 0 with no API error
+3. Dry-run JSON is well-formed with 3 chapters
+4. `--chapters 2` narrows to exactly one chapter
+5. Binary builds successfully
+6. Full suite green: `go build ./... && go vet ./... && go test ./...`
+
+A full real run against Vertex is out of scope for T2 — it needs GCP credentials + ffmpeg and is covered by the pipeline's integration test from S1-ab-8.
+
+### Files Created
+
+- `cmd/jeep-audiobook/main.go` — `main()`, `run()`, flag registration, usage printer, helpers (`parseChapters`, `planChapters`, `chapterPageSpan`, `selectIndices`, dry-run printer)
+- `cmd/jeep-audiobook/help_test.go` — help flag test
+- `cmd/jeep-audiobook/dryrun_test.go` — dry-run text/json, chapter selection, error cases
+
+### Gotchas
+
+**Do NOT touch CRITICAL paths:** `internal/gemini` is imported and its `NewClient` used, but not edited. This keeps the task off auto-escalation.
+
+**Order matters in `run`:** parse → `ResolveCommon` → (dry-run branch returns before any client) → real branch builds client. Never call `gemini.NewClient` in the dry-run path.
+
+**Output is a DIRECTORY, not a file:** The pipeline writes `chapter_NN.mp3` + `manifest.json` into it. The cache lives at `<output>/.cache` when `--resume`.
+
+**TTSFingerprint must be `"model|voice|style"`:** This format (DECISIONS.md S1-ab-8) ensures the segment/chapter cache keys change when voice/style/model change.
+
+**GeminiModel = the TEXT model:** This identifies Weave/Prepare output for the narration cache key, NOT the TTS model.
+
+**Concurrency=0 is correct as a default:** The pipeline and describe adapters treat `<=0` as "use 4". Do not pass a negative.
+
+**Replicated `chapterPageSpan` in cmd is intentional:** The ~15-line span walk is duplicated locally to avoid modifying `internal/pipeline`. If you would rather export it, that's a pipeline change (allowed, non-critical) but is beyond "wire the CLI".
+
+**ePub + page flags is an error, not a silent no-op:** Page-less source with page flags errors clearly.
+
+**Stdout clean:** All diagnostics/progress go to stderr via `slog`; only the dry-run listing and the final success/JSON summary go to stdout (so `--format json` output stays parseable).

@@ -15,6 +15,53 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — CLI integration: `cmd/jeep-audiobook` on shared plumbing (S1-ab-9)
+
+**Task:** S1-ab-9 · **Area:** feature (new `cmd/jeep-audiobook`)
+
+**Decision:** Added the fifth jeep CLI, `cmd/jeep-audiobook`, wiring the finished
+audiobook pipeline onto jeep's shared `internal/cli` + `internal/config` plumbing
+(matching the existing four tools: `jeep`, `jeep-image`, `jeep-tts`, `jeep-research`).
+Mirrors `cmd/jeep-tts/main.go` closely — same `flag.FlagSet` + `cli.CommonFlags` +
+`cli.RunMain` idiom, not audi's cobra/viper CLI.
+
+Supports PDF/ePub input, chapter selection by 1-based index (`--chapters 1,3-5`) or
+page window (`--from-page N --to-page M`, resolved to chapter indices in the CLI layer
+using each chapter's `[StartPage,EndPage]` span), resumable runs (`--resume` enables
+`DiskCache` under `<output>/.cache`), voice/style customization, and dry-run mode
+(prints planned chapters WITHOUT building a `*gemini.Client` or making API calls).
+
+**Rationale:** Page-window → chapter-index resolution in the CLI layer (replicated
+`chapterPageSpan` DFS, ~15 lines) avoids reintroducing page fields into
+`pipeline.Options` (meaningless over a Section tree; ePub/markdown/HTML have no pages).
+The alternative — exporting `pipeline.chapterPageSpan` — is allowed (non-critical) but
+beyond "wire the CLI" scope; prefer the local copy to minimize cross-package coupling.
+CLI-side mapping uses each chapter's page span (already computed for the manifest) to
+filter, then passes a simple `[]int` to the pipeline.
+
+**Gotchas:**
+- **Do NOT copy audi's cobra/viper CLI.** Use `internal/cli` + `internal/config` only.
+- **`--output` is a DIRECTORY**, not a file (unlike `jeep-tts` `-o output.wav`). The
+  pipeline writes `chapter_NN.mp3` + `manifest.json` into it; the cache lives at
+  `<output>/.cache` when `--resume`.
+- **Order matters in `run`:** parse → `ResolveCommon` → (dry-run branch returns before
+  any client) → real branch builds client. Never call `gemini.NewClient` in the
+  dry-run path.
+- **`TTSFingerprint` must be `"model|voice|style"`** (DECISIONS.md S1-ab-8) so the
+  segment/chapter cache keys change when voice/style/model change — otherwise a resume
+  would replay stale audio for new settings.
+- **`GeminiModel` = the TEXT model** (identifies Weave/Prepare output for the narration
+  cache key), NOT the TTS model.
+- **Concurrency=0 is correct as a default** — the pipeline and describe adapters treat
+  `<=0` as "use 4". Do not pass a negative.
+- **ePub + page flags is an error**, not a silent no-op (page-less source).
+- Keep **stdout clean**: all diagnostics/progress go to stderr via `slog`; only the
+  dry-run listing and the final success/JSON summary go to stdout (so `--format json`
+  output stays parseable, matching the other tools).
+- **Dry-run is OFFLINE** (bogus project still succeeds; model resolution is pure).
+
+---
+
 ## 2026-08-22 — Port `pipeline` (section-driven, resumable, loudness-normalized) (S1-ab-8)
 
 **Task:** S1-ab-8 · **Area:** infra (new packages `internal/audio` + `internal/pipeline`)
