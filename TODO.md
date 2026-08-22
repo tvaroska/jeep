@@ -96,7 +96,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: `internal/art` seam → generate per-chapter art from title+summary; embed as ID3 APIC in each chapter MP3 (one ffmpeg mux) + write `out/chapter_NN.png` sidecar + `image` field in manifest. `--art generate|extract|book-cover|none`. See audi `docs/CHAPTER_IMAGES_PLAN.md`.
   - Accept: a test shows a chapter MP3 gains an embedded cover (ffprobe reports a video/attached_pic stream) and a sidecar PNG is written; `go test ./...` green.
 
-- [ ] S1-ab-12 Markdown/plain-text + HTML/web-article `Source` adapters
+- [x] S1-ab-12 Markdown/plain-text + HTML/web-article `Source` adapters _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-2.
   - Scope: markdown/plain-text (`#`/`##` headings → section levels; fenced code → code blocks) and HTML/web-articles (readability-style main-content extraction → headings → sections; strip nav/boilerplate).
   - Accept: unit tests convert a markdown fixture and an HTML-article fixture into correct section trees; `go test ./...` green.

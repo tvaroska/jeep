@@ -21,8 +21,10 @@ import (
 	"github.com/tvaroska/jeep/internal/describe"
 	"github.com/tvaroska/jeep/internal/epubsource"
 	"github.com/tvaroska/jeep/internal/gemini"
+	"github.com/tvaroska/jeep/internal/htmlsource"
 	"github.com/tvaroska/jeep/internal/ingest"
 	"github.com/tvaroska/jeep/internal/log"
+	"github.com/tvaroska/jeep/internal/mdsource"
 	"github.com/tvaroska/jeep/internal/pdfsource"
 	"github.com/tvaroska/jeep/internal/pipeline"
 	"github.com/tvaroska/jeep/internal/usage"
@@ -287,8 +289,12 @@ func selectSource(path string, logger *slog.Logger) (ingest.Source, error) {
 		return &pdfsource.Source{Log: logger}, nil
 	case ".epub":
 		return &epubsource.Source{Log: logger}, nil
+	case ".md", ".markdown", ".txt", ".text":
+		return &mdsource.Source{Log: logger}, nil
+	case ".html", ".htm":
+		return &htmlsource.Source{Log: logger}, nil
 	default:
-		return nil, cli.Exitf(cli.ExitUsage, "unsupported input format %q (supported: .pdf, .epub)", ext)
+		return nil, cli.Exitf(cli.ExitUsage, "unsupported input format %q (supported: .pdf, .epub, .md, .txt, .html)", ext)
 	}
 }
 
@@ -520,7 +526,7 @@ func imageModelIfArt(artMode, imageModel string) string {
 func printUsage(fs *flag.FlagSet, w io.Writer) {
 	fmt.Fprint(w, `Usage: jeep-audiobook [flags] <input-file>
 
-Generate an audiobook from a PDF or ePub using Gemini TTS via Vertex AI.
+Generate an audiobook from a PDF, ePub, Markdown, or HTML file using Gemini TTS via Vertex AI.
 
 Flags:
 `)
@@ -532,5 +538,7 @@ Examples:
   jeep-audiobook --dry-run --from-page 10 --to-page 50 book.pdf
   jeep-audiobook --art generate book.pdf
   jeep-audiobook --resume book.pdf
+  jeep-audiobook article.md -o markdown-audiobook
+  jeep-audiobook webpage.html -o web-audiobook
 `)
 }

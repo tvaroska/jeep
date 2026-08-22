@@ -68,7 +68,7 @@ func TestDryRun_ChapterSelection(t *testing.T) {
 func TestUnsupportedExtension(t *testing.T) {
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"--dry-run", "foo.txt"}, &stdout, &stderr)
+	err := run([]string{"--dry-run", "foo.docx"}, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error for unsupported extension")
 	}
