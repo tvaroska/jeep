@@ -15,6 +15,47 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Format-agnostic ingestion seam: page→tree translation (S1-ab-2)
+
+**Task:** S1-ab-2 · **Area:** infra (new package `internal/ingest`)
+
+**Decision:** Introduced the format-agnostic document model (`Source → Document{Sections}`)
+and section-tree-based chapterization, replacing audi's page-centric TOC model. The
+`internal/ingest` package defines the model (`BlockKind`, `Block`, `Section`, `Meta`,
+`Document`) and the `Source` seam interface that format adapters (PDF/ePub/md/html in
+later tasks) will implement.
+
+Key design choices:
+1. **Page→tree translation:** Sections form a tree (`Section.Children`); top-level roots
+   are `doc.Sections`. No `StartPage`/`EndPage`, no page ranges. Chapters are derived by
+   walking the tree, not by slicing a flat TOC.
+2. **Intro-shim for expansion:** A section with ≥2 children expands into one chapter per
+   child. The parent's own intro `Blocks` (prose before subsections) are absorbed by the
+   first child via a synthetic intro-shim `&Section{Title:"", Level: sec.Level, Blocks:
+   sec.Blocks}` prepended to `Chapter.Sections`. Keeps the `Chapter` type uniform (always
+   `[]*Section`), no double-counting.
+3. **`Source.Load(path string) (*Document, error)`:** Context-free to match audi's
+   `Extract(path)` idiom; ingestion is local I/O. Adapters land in S1-ab-3 (PDF),
+   S1-ab-4 (ePub), S1-ab-12 (md/html).
+4. **Boilerplate filtering:** Ported audi's `defaultSkipTitles` verbatim (cover/copyright/
+   table of contents/contents/index/colophon); matched case-insensitively at prefix or
+   exact. Applied at top level only. Preface/Foreword/Introduction are real content and
+   are NOT skipped.
+5. **Heading detection deferred:** The old `chaptersFromHeadings` text heuristic is NOT
+   ported. For headless formats (plain markdown/text/HTML-articles), the adapter (S1-ab-12)
+   builds the tree by detecting headings; chapterization only consumes an already-built tree.
+
+**Gotchas:**
+- `internal/ingest` has ZERO external deps — stdlib only (`strings`, `reflect`/`testing`).
+  No genai, no pdfcpu, no ledongthuc. Keeps it off CRITICAL and trivially unit-testable.
+- Do not reintroduce `minLevel`, page dedup, clamp, or `numPages` — they are page-model
+  artifacts with no meaning in the tree.
+- The intro-shim carries ONLY the parent's own `Blocks`, not its `Children` (would
+  double-count). When the pipeline later flattens `chapter.Sections`, the intro appears
+  exactly once ahead of the first expanded child.
+
+---
+
 ## 2026-08-22 — Reusable `internal/gemini` client + `GenerateSpeech` upgrade (S1-ab-1)
 
 **Task:** S1-ab-1 · **Area:** infra (SENSITIVE — touches `internal/gemini`)

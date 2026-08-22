@@ -46,7 +46,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: add a constructed long-lived `Client` (genai client + project/region) with `Generate`/`GenerateImage`/`GenerateSpeech` methods; keep package funcs as thin wrappers. Add to `GenerateSpeech`: (a) style-prompt prefix param, (b) PCM→MP3 encode (ffmpeg), (c) expose the oversized-input error so callers can classify `genai.APIError{Code:400}`.
   - Accept: `go build ./... && go vet ./... && go test ./...` green; existing jeep/jeep-image/jeep-research/jeep-tts still build+test green; unit test proves PCM→MP3 output is a valid MP3 (ffprobe positive duration), the style prefix reaches the request (fake client), and a 400 surfaces as a classifiable error while 429/500/503 still retry.
 
-- [ ] S1-ab-2 Format-agnostic ingestion seam: `Source → Document{Sections}` + section-based chapterization
+- [x] S1-ab-2 Format-agnostic ingestion seam: `Source → Document{Sections}` + section-based chapterization _(done 2026-08-22; see docs/features/*)_
   - Deps: none.
   - Scope: define `Section` (title, level, ordered content blocks: prose/figure/caption/code/table, children) and `Document{Meta, Sections}`. Port audi's 30–45-min chapter grouping + boilerplate-skip (`internal/pdfx/structure.go`) to walk the section tree instead of TOC+pages.
   - Accept: unit tests over a synthetic section tree reproduce audi's `structure_test.go` expectations (chapter expansion when ≥2 children; boilerplate titles — cover/copyright/toc/index/colophon — dropped); `go test ./...` green.
