@@ -76,7 +76,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: `chunk→map→reduce[+refine]` helper (generic over element/partial/result; caller supplies map/reduce prompts+schema+chunker; concurrency+retry via `errgroup`/`retry.Do`). Refit `jeep-research`'s hand-rolled synthesis onto it so there's one implementation.
   - Accept: helper unit test (chunk→map→reduce over a fake produces the expected reduced result); `jeep-research` still builds + tests green; `go test ./...` green.
 
-- [ ] S1-ab-8 Port `pipeline` (section-driven; loudness normalize + re-split + 3-level cache + manifest)
+- [x] S1-ab-8 Port `pipeline` (section-driven; loudness normalize + re-split + 3-level cache + manifest) _(done 2026-08-22; see docs/features/ab.md)_
   - Deps: S1-ab-1, S1-ab-2, S1-ab-3, S1-ab-5, S1-ab-6.
   - Scope: move audi `internal/pipeline` — resumable content-addressed cache (narration/segments/chapters), ffmpeg concat + per-segment EBU R128 loudnorm, adaptive re-split on the 400 classification, per-chapter manifest. Swap the Synthesizer to the shared `gemini` client; drive off `Sections` not pages.
   - Accept: an integration test on a tiny fixture (few short sections, fake gemini + real ffmpeg) produces a manifest + a normalized MP3 whose integrated loudness is within tolerance of -16 LUFS (ffprobe/loudnorm); a fake 400 triggers one re-split; re-run reuses cache; `go test ./...` green.

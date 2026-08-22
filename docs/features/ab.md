@@ -618,3 +618,70 @@ The task left `cmd/jeep-research` and `internal/interactions` completely untouch
 **Order preservation:** Write map results to `partials[i]`, never append from goroutines. The slice is pre-allocated with `len(spec.Elements)`; each goroutine owns its index.
 
 **No usage tracking yet:** Defer to S1-ab-10 to avoid gold-plating. If Step later needs to expose tokens, return `*gemini.GenerateResult` alongside `T` or accept a `*usage.Tracker` param.
+
+---
+
+## Pipeline Orchestrator (section-driven, resumable, loudness-normalized)
+
+**Built:** 2026-08-22 (S1-ab-8)
+
+### What Was Built
+
+Ported audi's `internal/pipeline` (plus the TTS-adjacent segmentation/concat helpers from audi `internal/tts`) into jeep as two packages — `internal/audio` and `internal/pipeline` — rewired off the format-agnostic `ingest` Section tree instead of PDF pages, and synthesizing through the shared `gemini.Client` (PCM → MP3) instead of Cloud TTS gRPC. The orchestrator drives, per chapter: Weave (image descriptions) → Prepare (listening adaptation) → Segment → Synthesize (bounded worker pool) → Concat (per-segment EBU R128 loudness normalize) → Probe → manifest entry. It keeps the resumable 3-level content-addressed cache, adaptive re-split on Vertex HTTP 400, and a per-book `manifest.json`.
+
+### The `internal/audio` Package
+
+Three pieces, all pure/local with a Gemini seam:
+- **`segment.go`** — verbatim port of audi's sentence/word-aware `Segmenter` (`MaxBytes`, `DefaultMaxSegmentBytes=3000`, greedy pack + hard-rune-split fallback). Package renamed `tts`→`audio`.
+- **`concat.go`** — verbatim port of `FFmpegConcatenator`. `Normalize:true` decodes each segment as a separate input, applies `loudnorm=I=-16:TP=-1.5:LRA=11,aformat=sample_rates=44100:channel_layouts=mono`, and joins via the concat filter in one encode. With `Normalize:true` even a single segment goes through ffmpeg so lone-segment chapters hit the same loudness target as multi-segment ones.
+- **`synthesize.go`** — NEW. The `Synthesizer` seam plus `GeminiSynthesizer` (GCP adapter) and `StubSynthesizer` (offline). `GeminiSynthesizer.Synthesize` calls `speechClient.GenerateSpeech` (a package-local narrow interface `*gemini.Client` satisfies structurally — the same seam idiom as describe/mapreduce, since `gemini.Client.models` is unexported) and encodes the returned PCM with `gemini.PCMToMP3`. `IsOversizedInput(err)` re-exports `gemini.IsInvalidInput` so the pipeline needn't import gemini for the 400 classification.
+
+### The `internal/pipeline` Package
+
+- **`cache.go`** — near-verbatim `Cache` seam + `DiskCache` local adapter (atomic temp+fsync+rename), `nopCache` nil-safe fallback, length-prefixed SHA-256 `hashKey`, and the three key builders: `narrationCacheKey` (`narration-v2`, keyed on Gemini model + every PageContent's text/image bytes), `segmentCacheKey` (`segment-v1`, keyed on segment text + TTS fingerprint), `chapterCacheKey` (`chapter-v1`).
+- **`manifest.go`** — near-verbatim `Manifest`/`ChapterEntry`, `WriteManifest`, and the `Prober` seam + `FFprobeProber` local adapter.
+- **`run.go`** — rewritten `Runner`/`Options`/`Run` for the ingest model.
+
+### Key Rewrites From the Page Model
+
+**Drives off `ingest.Source` + `ingest.Structure`, not PDF pages.** `Run` does `doc := r.Source.Load(opts.InputPath)`, `chapters := ingest.Structure(doc)`, then `selectChapters`. `Options` dropped audi's `FromPage`/`ToPage`; chapter selection is now 1-based indices into `Structure`'s output (`Options.Chapters`).
+
+**Section-tree → PageContent flattening.** `chapterToPageContents` walks a chapter's Section subtree pre-order (own Blocks then Children) emitting ONE `describe.PageContent` per Block: a `BlockFigure` (with data) becomes a PageContent carrying one `ImageRef` so Weave inserts its spoken description at exactly that position; a prose Block with non-blank text becomes a text PageContent. This preserves reading order and lets Weave splice image descriptions inline.
+
+**Page span best-effort.** `chapterPageSpan` derives `[StartPage,EndPage]` from the min-non-zero/max `Block.Page`; page-less formats (ePub/markdown/HTML) carry `Page==0` so both come back 0.
+
+### 3-Level Resumable Cache (unchanged semantics)
+
+1. **narration** — guards both Gemini stages (Weave+Prepare) AND stabilizes the adapted narration across process restarts, which is the prerequisite for the segment cache to hit on a fresh run (Gemini output is non-deterministic).
+2. **segments** — guards the (many, expensive) TTS calls; keyed per segment so concurrent writes go to distinct atomic files.
+3. **chapters** — a tiny completion record (`{file, duration_seconds}`) written only AFTER concat+probe succeed. The resume short-circuit fires only when the record exists AND the mp3 still exists on disk, so a crash between concat and record-write, or a deleted mp3, correctly falls through and rebuilds.
+
+All cache read/write errors are NON-FATAL: log at Warn and treat as miss/no-op, so a broken cache degrades to "recompute", never aborts a run.
+
+### Adaptive Re-split
+
+`synthSegment` recurses: on a Vertex 400 (`audio.IsOversizedInput`) it re-splits the text at half the byte budget via the segmenter and synthesizes the pieces, flattening blobs in reading order (`maxSplitDepth=4`). A cancelled context is fatal (not a re-split trigger); any non-400 error (e.g. a transient 503) is surfaced unchanged on the first attempt — smaller pieces won't fix it.
+
+### Verification
+
+- **T1:** `go build ./... && go vet ./... && go test ./...` green; `CGO_ENABLED=0 go build ./...` exits 0; `go mod tidy` adds no dependency (no `texttospeech`/`gax-go`/`grpc` re-added — `grpc` was already an indirect dep of genai); `git diff --stat` shows no changes under `internal/gemini/` or `internal/gcp/`.
+- **T2 (integration, real ffmpeg/ffprobe):** `TestPipeline_Integration` produces a `manifest.json` that parses, `chapter_01.mp3` with a positive ffprobe duration, and a measured integrated loudness within ±2 LU of -16 LUFS (via a `loudnorm ... print_format=json` analysis pass parsing `input_i`); a re-run over the same `DiskCache` synthesizes 0 new segments; and a fake 400-then-success variant re-splits (exactly one rejection) and still yields a valid normalized mp3.
+- **T2 (unit):** `-run Resplit` proves one 400 → segment→halves re-split completes and a 503 is NOT re-split (`calls==1`); `-run Resume` proves a second Run does no new Weave/Prepare/Synthesize work and grows cache puts by 0; `internal/audio -run Oversized` covers the segmenter oversize path and the 400/503 classification.
+
+### Files Created
+
+- `internal/audio/segment.go`, `concat.go`, `synthesize.go` (+ `_test.go` for each)
+- `internal/pipeline/cache.go`, `manifest.go`, `run.go`
+- `internal/pipeline/cache_test.go`, `manifest_test.go`, `run_test.go`, `run_integration_test.go`
+
+### Gotchas
+
+**Loudness needs enough audio.** EBU R128 integrated loudness gates over the whole file; the integration test synthesizes a ~4s sine per segment so the measurement is stable. A sub-second clip can measure unreliably. The ±2 LU tolerance absorbs the one-pass `loudnorm` dynamic-mode residual.
+
+**`grpc` is a pre-existing indirect dep.** It ships transitively with the genai SDK and was already in `go.mod` before this task. The "no gRPC" constraint means "do not re-add the Cloud TTS gRPC stack (`cloud.google.com/go/texttospeech`, `gax-go`)", which this port does not.
+
+**No TTS usage/cost tracking.** `gemini.SpeechResult` carries only `PCMData` + `ModelVersion` (no token metadata), so only the describe/prepare stages contribute to `usage.Tracker`. audi's TTS character/cost accounting was intentionally dropped (single-currency model, see S1-ab-5).
+
+**Per-chapter image streaming was NOT ported.** audi streamed cover art / per-chapter ID3 art; that is out of scope here and lands in S1-ab-11. The manifest carries text + duration + page span only.
+
+**`--from-page`/`--to-page` has no meaning over a Section tree** and was dropped from `Options`. If page-window selection parity is still wanted for PDFs, it belongs in the S1-ab-9 CLI as a page→chapter-index resolution step — PROPOSED, not implemented here.

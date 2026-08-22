@@ -15,6 +15,52 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Port `pipeline` (section-driven, resumable, loudness-normalized) (S1-ab-8)
+
+**Task:** S1-ab-8 · **Area:** infra (new packages `internal/audio` + `internal/pipeline`)
+
+**Decision:** Ported audi's `internal/pipeline` (+ the TTS-adjacent segment/concat
+helpers from audi `internal/tts`) into two jeep packages, rewired to (1) drive off
+the `ingest` Section tree, not PDF pages; (2) synthesize through the shared
+`gemini.Client` (`GenerateSpeech` → PCM, then `gemini.PCMToMP3`) instead of Cloud
+TTS gRPC; while keeping the resumable 3-level content-addressed cache, per-segment
+EBU R128 loudness normalize, adaptive re-split on Vertex 400, and per-book manifest.
+
+Split into `internal/audio` (segmenter + `FFmpegConcatenator` + the `Synthesizer`
+seam with `GeminiSynthesizer`/`StubSynthesizer`) and `internal/pipeline` (the
+`Cache`/`DiskCache`, `Prober`/`FFprobeProber`, and the `Runner`). The synth seam
+uses the same package-local narrow-interface idiom as describe/mapreduce
+(`speechClient` that `*gemini.Client` satisfies structurally), so nothing under the
+CRITICAL `internal/gemini` path was touched.
+
+**Rationale:** Section-tree flattening (`chapterToPageContents`: one
+`describe.PageContent` per Block — figure→ImageRef, prose→text, pre-order DFS)
+preserves reading order and lets Weave splice image descriptions inline, while
+decoupling the pipeline from pagination so ePub/markdown/HTML work uniformly. The
+narration cache stabilizes non-deterministic Gemini output across restarts, which
+is the prerequisite for the segment cache to hit on a fresh resume. Re-split keys
+only on the 400 classification (`audio.IsOversizedInput` → `gemini.IsInvalidInput`)
+so oversized segments no longer crash a full-book run.
+
+**Gotchas:**
+- **Loudness needs enough audio.** EBU R128 integrated loudness gates over the
+  whole file; the integration test synthesizes ~4s of sine per segment so the
+  measurement is stable, and asserts within ±2 LU of -16 LUFS (the one-pass
+  `loudnorm` dynamic-mode residual). A sub-second clip measures unreliably.
+- **`grpc` is a pre-existing indirect dep** (ships with the genai SDK; already in
+  `go.mod`). The "no gRPC" constraint means "don't re-add the Cloud TTS gRPC stack
+  (`cloud.google.com/go/texttospeech`, `gax-go`)" — this port adds no dependency.
+- **No TTS usage/cost tracking:** `gemini.SpeechResult` carries only `PCMData` +
+  `ModelVersion` (no token metadata), so only describe/prepare feed `usage.Tracker`.
+- **Per-chapter cover-art / ID3 streaming NOT ported** (out of scope → S1-ab-11).
+- **`--from-page`/`--to-page` dropped from `Options`** (meaningless over a Section
+  tree). **PROPOSAL for S1-ab-9:** if PDF page-window selection parity is still
+  wanted, resolve a page window → chapter indices in the CLI layer (using each
+  chapter's `[StartPage,EndPage]` span from the manifest/`chapterPageSpan`) and pass
+  the resulting `Options.Chapters` — do not reintroduce page fields into the pipeline.
+
+---
+
 ## 2026-08-22 — Generic map-reduce helper on `gemini.Generate` (S1-ab-7)
 
 **Task:** S1-ab-7 · **Area:** infra (new package `internal/mapreduce`)
