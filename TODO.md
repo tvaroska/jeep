@@ -71,7 +71,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: move the audiobook prompts (figure description, inline weaving, listening adaptation); delete genai plumbing, call `gemini.Generate` with schemas. The prepare/"read for listening" system prompt MUST include artifact-repair guidance (re-join line-wrap-split words; restore dropped ligatures — leading `Th`/`fi`/dropped `The`) — see DECISIONS.md.
   - Accept: `describe` unit tests pass against a fake gemini client; a test asserts the prepare system prompt contains the artifact-repair instruction; `go test ./...` green.
 
-- [ ] S1-ab-7 Generic map-reduce helper on `gemini.Generate`; refit `jeep-research` (SENSITIVE: touches `internal/gemini` + jeep-research)
+- [x] S1-ab-7 Generic map-reduce helper on `gemini.Generate`; refit `jeep-research` (SENSITIVE: touches `internal/gemini` + jeep-research) _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-1.
   - Scope: `chunk→map→reduce[+refine]` helper (generic over element/partial/result; caller supplies map/reduce prompts+schema+chunker; concurrency+retry via `errgroup`/`retry.Do`). Refit `jeep-research`'s hand-rolled synthesis onto it so there's one implementation.
   - Accept: helper unit test (chunk→map→reduce over a fake produces the expected reduced result); `jeep-research` still builds + tests green; `go test ./...` green.
