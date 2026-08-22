@@ -15,6 +15,70 @@ gitignored `.claude/plans/` files.
 
 ---
 
+## 2026-08-22 — Port `describe` onto `gemini.Generate` + structured JSON (S1-ab-6)
+
+**Task:** S1-ab-6 · **Area:** infra (new package `internal/describe`)
+
+**Decision:** Ported audi's `internal/describe` (figure description + inline weaving +
+listening adaptation) into jeep, routing every LLM call through `gemini.Generate` with
+structured-JSON response schemas and deleting audi's hand-rolled genai plumbing.
+
+Key design choices:
+1. **Local `generator` interface is mandatory.** `gemini.Client.models` is unexported;
+   an external package cannot inject a fake into a real `*gemini.Client`. describe
+   defines its own narrow interface matching `gemini.Client.Generate`; `*gemini.Client`
+   satisfies it structurally, and tests supply a `fakeGenerator`.
+2. **Structured JSON wrapping.** `gemini.Generate` sets `ResponseMIMEType="application/json"`
+   + `ResponseSchema` when `schema != nil`; the returned `GenerateResult.Text` is the
+   JSON string. You MUST `json.Unmarshal` it into the `{description}` / `{narration}`
+   struct — do not return `res.Text` raw (it would be a JSON blob, not narration).
+3. **`GenerateResult` has no `TotalTokens`.** It exposes only `PromptTokens` and
+   `OutputTokens` (int32). Compute total = prompt+output for `usage.Record`.
+4. **No ThinkingConfig in jeep.** audi disabled thinking (`ThinkingBudget:0`) so
+   reasoning tokens wouldn't eat `MaxOutputTokens` and truncate the rewrite. jeep's
+   `GenerateOptions` has no such field, and adding one would modify CRITICAL
+   `internal/gemini`. Instead, **leave prepare's `MaxTokens` unset (0)** so no output
+   cap is imposed and the model's default budget applies; the existing ~6000-char
+   chunking keeps each rewrite small. If real runs later show truncation, PROPOSE a
+   follow-up task to add a thinking-budget knob to `GenerateOptions` — do not sneak
+   it into this task.
+5. **Retry semantics changed.** jeep retries only 429/500/503 (see `isRetryable` in
+   gemini.go); audi also retried 502/504 and `context.DeadlineExceeded`. This is the
+   accepted jeep convention — do not re-introduce a describe-local retry loop. Drive
+   retries via `GenerateOptions.Retries` (default 4). Tests verify a 400
+   (`genai.APIError{Code:400}`) is NOT retried (call count == 1), while 503 would be
+   (handled by gemini layer, not tested at describe level).
+6. **Artifact-repair prompt guidance is load-bearing.** The prepare system prompt now
+   explicitly instructs the model to repair extraction artifacts: re-join words split
+   across line wraps (hyphenation / mid-word breaks), restore dropped leading letters
+   and ligatures at word starts (e.g. `unied`→`unified`, `ree pillars`→`three pillars`,
+   dropped `The`/`Th`/`fi` restored). This is the phase-0 spike's validated solution to
+   PDF text quality — do NOT remove or weaken this guidance.
+
+**Verified:** Tests (Describe with JSON `{"description":"..."}`, Prepare with JSON
+`{"narration":"..."}`, retry test showing 503 propagates vs 400 is fatal, usage-recording,
+Weave concurrency, chunk logic) all PASS; artifact-repair test asserts the real exported
+constant contains "ligature" or "line" guidance; `go build ./... && go vet ./... && go test
+./...` all green; `CGO_ENABLED=0 go build ./...` exits 0 (pure-Go); `go mod tidy` promotes
+only `golang.org/x/sync` to direct require; `git diff --stat` shows no files under
+`internal/gemini/`.
+
+**Gotchas:**
+- **Local `generator` interface is a pattern** — reuse it in other packages that need to
+  fake `gemini.Client` (e.g., pipeline, map-reduce).
+- **JSON schema required** — tests MUST return valid JSON matching the schema (e.g.,
+  `{"description":"text"}`, NOT just `"text"`), or unmarshal will fail.
+- **Retries tested indirectly** — the describe package does NOT test retry counts; that's
+  gemini's responsibility. Tests verify a 400 error propagates (no retry) by checking
+  `fake.calls == 1`.
+- **Artifact-repair guidance is in the PROMPT** — it's a string constant, not a runtime
+  flag. Tests assert its presence. Do not dilute or remove it; the phase-0 spike validated
+  it as the solution to PDF text quality.
+- **No `NewGeminiDescriber` / `NewGeminiPreparer`** — CLI wiring (S1-ab-9) constructs
+  adapters directly with a `*gemini.Client` and sets fields. There's no factory function.
+
+---
+
 ## 2026-08-22 — Token-only usage tracking + structured logging (S1-ab-5)
 
 **Task:** S1-ab-5 · **Area:** infra (new packages `internal/usage`, `internal/log`)

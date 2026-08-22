@@ -66,7 +66,7 @@ between tasks so dependents unblock as their prerequisites flip to `- [x]`.
   - Scope: move audi `internal/usage` + `internal/log`; usage is token-based (one currency) off genai metadata.
   - Accept: unit test shows the tracker accumulates prompt/output/total tokens across calls; `go build ./... && go test ./...` green.
 
-- [ ] S1-ab-6 Port `describe` onto `gemini.Generate` + structured JSON
+- [x] S1-ab-6 Port `describe` onto `gemini.Generate` + structured JSON _(done 2026-08-22; see docs/features/*)_
   - Deps: S1-ab-1.
   - Scope: move the audiobook prompts (figure description, inline weaving, listening adaptation); delete genai plumbing, call `gemini.Generate` with schemas. The prepare/"read for listening" system prompt MUST include artifact-repair guidance (re-join line-wrap-split words; restore dropped ligatures — leading `Th`/`fi`/dropped `The`) — see DECISIONS.md.
   - Accept: `describe` unit tests pass against a fake gemini client; a test asserts the prepare system prompt contains the artifact-repair instruction; `go test ./...` green.
